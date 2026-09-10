@@ -9,9 +9,8 @@ public class DreamSpaceEditorTarget : TargetRules
 	{
 		Type = TargetType.Editor;
 		DefaultBuildSettings = BuildSettingsVersion.V5;
-		// 项目使用安装版引擎；显式允许本项目目标覆盖编辑器共享环境的告警设置。
-		bOverrideBuildEnvironment = true;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_6;
 
-		ExtraModuleNames.AddRange( new string[] { "DreamSpace" } );
+		ExtraModuleNames.AddRange( new string[] { "DreamSpace", "DreamInteractionEditor" } );
 	}
 }
