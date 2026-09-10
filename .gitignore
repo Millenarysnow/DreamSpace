@@ -1,0 +1,12 @@
+*
+!*/
+
+!/.git*
+
+!/Config/**
+!/Content/**
+!/Source/**
+!/Documents/**
+!/RawContent/**
+
+!/*.uproject
