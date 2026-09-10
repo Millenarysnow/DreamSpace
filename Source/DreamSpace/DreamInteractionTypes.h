@@ -169,6 +169,12 @@ struct DREAMSPACE_API FDreamAssemblyState
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "重力")
 	int32 GravityPriority = 0;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "状态")
+	bool bIsCarried = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "状态")
+	FGameplayTagContainer StateTags;
+
 	/** 每成功提交一次命令递增，用于并发保护和未来网络验证。 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "状态")
 	int64 StateVersion = 0;
@@ -228,6 +234,25 @@ struct DREAMSPACE_API FDreamNodeTransformChange
 	FTransform NewLocalTransform;
 };
 
+/** 节点状态转移结果，破坏、释放和锁定都通过该结构进入事务。 */
+USTRUCT(BlueprintType)
+struct DREAMSPACE_API FDreamNodeStateChange
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	FGuid NodeId;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	EDreamNodeRuntimeState NewRuntimeState = EDreamNodeRuntimeState::Intact;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	bool bExists = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	bool bLocked = false;
+};
+
 /** 可验证、可记录的操作命令。 */
 USTRUCT(BlueprintType)
 struct DREAMSPACE_API FDreamInteractionCommand
@@ -254,14 +279,30 @@ struct DREAMSPACE_API FDreamInteractionCommand
 	TArray<FDreamNodeTransformChange> TransformChanges;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	TArray<FDreamNodeStateChange> StateChanges;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
 	FVector NewLocalGravityDirection = FVector::ZeroVector;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
 	bool bChangesGravity = false;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	bool bSetsCarriedState = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	bool bIsCarried = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	FGameplayTagContainer AddedStateTags;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "命令")
+	FGameplayTagContainer RemovedStateTags;
+
 	bool IsValid() const
 	{
-		return Type != EDreamCommandType::Invalid && AssemblyId.IsValid() && CommandId.IsValid();
+		return Type != EDreamCommandType::Invalid && AssemblyId.IsValid() && CommandId.IsValid() &&
+			(!TransformChanges.IsEmpty() || !StateChanges.IsEmpty() || bChangesGravity);
 	}
 };
 

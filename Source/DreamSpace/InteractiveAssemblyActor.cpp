@@ -74,6 +74,7 @@ bool AInteractiveAssemblyActor::InitializeFromDefinition()
 	AssemblyState.LocalGravityDirection = Definition->DefaultLocalGravityDirection.GetSafeNormal();
 	AssemblyState.bProvidesGravity = Definition->bProvidesGravity;
 	AssemblyState.GravityPriority = Definition->GravityPriority;
+	AssemblyState.StateTags = Definition->DefaultStateTags;
 	AssemblyState.StateVersion = 0;
 
 	// 先创建所有组件，再建立父子关系，因此资产中的节点顺序可以自由调整。
@@ -355,6 +356,18 @@ bool AInteractiveAssemblyActor::PreviewCommand(const FDreamInteractionCommand& C
 			return false;
 		}
 		Node->LocalTransform = Change.NewLocalTransform;
+	}
+	for (const FDreamNodeStateChange& Change : Command.StateChanges)
+	{
+		FDreamNodeState* Node = PreviewState.FindNode(Change.NodeId);
+		if (!Node)
+		{
+			OutFailure = FText::FromString(TEXT("预览包含不存在的节点状态。"));
+			return false;
+		}
+		Node->RuntimeState = Change.NewRuntimeState;
+		Node->bExists = Change.bExists;
+		Node->bLocked = Change.bLocked;
 	}
 	ApplyStateToComponents(PreviewState);
 	bHasPreview = true;

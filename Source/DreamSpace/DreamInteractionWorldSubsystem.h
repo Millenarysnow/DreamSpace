@@ -6,6 +6,8 @@
 #include "DreamInteractionWorldSubsystem.generated.h"
 
 class AInteractiveAssemblyActor;
+class UDreamInteractionCapability;
+class UDreamInteractionSaveGame;
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FDreamTransactionCommitted, const FDreamInteractionTransaction& /*Transaction*/);
 
@@ -38,8 +40,20 @@ public:
 		FDreamInteractionTransaction* OutTransaction,
 		FText& OutFailure);
 
+	/** 带能力规则校验的提交入口；所有高层交互都应优先使用它。 */
+	bool ExecuteCommand(const UDreamInteractionCapability& Capability,
+		const FDreamInteractionCommand& Command,
+		FDreamInteractionTransaction* OutTransaction,
+		FText& OutFailure);
+
 	/** 回滚最近一次已经提交的事务，供开发调试和编辑器 Undo 使用。 */
 	bool UndoLastTransaction(const FGuid& AssemblyId, FText& OutFailure);
+
+	/** 将当前所有装配体逻辑状态写入存档对象。 */
+	void CaptureToSaveGame(UDreamInteractionSaveGame& SaveGame) const;
+
+	/** 从存档恢复所有已注册装配体；单个对象失败不会污染其他对象。 */
+	bool RestoreFromSaveGame(const UDreamInteractionSaveGame& SaveGame, TArray<FGuid>& OutRestoredIds);
 
 	/** 返回当前注册的装配体，目标解析器可在此基础上做射线筛选。 */
 	void GetRegisteredAssemblies(TArray<AInteractiveAssemblyActor*>& OutAssemblies) const;
@@ -48,6 +62,11 @@ public:
 	bool ResolveComponentTarget(const UPrimitiveComponent* HitComponent,
 		AInteractiveAssemblyActor*& OutAssembly,
 		FGuid& OutNodeId) const;
+
+	/** 根据位置解析当前有效的局部重力源，优先级高者胜出。 */
+	bool ResolveGravityAtLocation(const FVector& WorldLocation,
+		FVector& OutGravityDirection,
+		FGuid* OutSourceAssemblyId = nullptr) const;
 
 	FDreamTransactionCommitted OnTransactionCommitted;
 
@@ -62,4 +81,3 @@ private:
 		const FDreamInteractionCommand& Command,
 		FText& OutFailure) const;
 };
-

@@ -24,6 +24,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "装配体")
 	FText DisplayName;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "状态")
+	FGameplayTagContainer DefaultStateTags;
+
 	/** 装配体级能力。节点能力在对应节点定义中配置。 */
 	UPROPERTY(EditAnywhere, Instanced, BlueprintReadOnly, Category = "能力")
 	TArray<TObjectPtr<UDreamInteractionCapability>> Capabilities;

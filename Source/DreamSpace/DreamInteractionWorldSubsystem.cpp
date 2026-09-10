@@ -1,6 +1,8 @@
 #include "DreamInteractionWorldSubsystem.h"
 
 #include "InteractiveAssemblyActor.h"
+#include "DreamInteractionCapability.h"
+#include "DreamInteractionSaveGame.h"
 #include "Components/PrimitiveComponent.h"
 
 void UDreamInteractionWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -84,6 +86,11 @@ bool UDreamInteractionWorldSubsystem::ValidateCommand(const AInteractiveAssembly
 		OutFailure = FText::FromString(TEXT("变换命令没有任何节点变更。"));
 		return false;
 	}
+	if (Command.Type == EDreamCommandType::SetNodeState && Command.StateChanges.IsEmpty())
+	{
+		OutFailure = FText::FromString(TEXT("状态命令没有任何节点变更。"));
+		return false;
+	}
 
 	TSet<FGuid> ChangedIds;
 	for (const FDreamNodeTransformChange& Change : Command.TransformChanges)
@@ -102,6 +109,21 @@ bool UDreamInteractionWorldSubsystem::ValidateCommand(const AInteractiveAssembly
 		if (!Change.NewLocalTransform.IsValid() || Change.NewLocalTransform.GetScale3D().GetMin() <= KINDA_SMALL_NUMBER)
 		{
 			OutFailure = FText::FromString(TEXT("命令包含无效的目标变换。"));
+			return false;
+		}
+		ChangedIds.Add(Change.NodeId);
+	}
+	for (const FDreamNodeStateChange& Change : Command.StateChanges)
+	{
+		if (!Change.NodeId.IsValid() || ChangedIds.Contains(Change.NodeId))
+		{
+			OutFailure = FText::FromString(TEXT("状态命令包含无效或重复的节点 ID。"));
+			return false;
+		}
+		const FDreamNodeState* Node = Assembly.AssemblyState.FindNode(Change.NodeId);
+		if (!Node)
+		{
+			OutFailure = FText::FromString(TEXT("状态命令包含不存在的节点。"));
 			return false;
 		}
 		ChangedIds.Add(Change.NodeId);
@@ -155,6 +177,15 @@ bool UDreamInteractionWorldSubsystem::ExecuteCommand(const FDreamInteractionComm
 			Node->LocalTransform = Change.NewLocalTransform;
 		}
 	}
+	for (const FDreamNodeStateChange& Change : Command.StateChanges)
+	{
+		if (FDreamNodeState* Node = AfterState.FindNode(Change.NodeId))
+		{
+			Node->RuntimeState = Change.NewRuntimeState;
+			Node->bExists = Change.bExists;
+			Node->bLocked = Change.bLocked;
+		}
+	}
 	if (Command.bChangesGravity)
 	{
 		if (Command.NewLocalGravityDirection.IsNearlyZero())
@@ -164,6 +195,12 @@ bool UDreamInteractionWorldSubsystem::ExecuteCommand(const FDreamInteractionComm
 		}
 		AfterState.LocalGravityDirection = Command.NewLocalGravityDirection.GetSafeNormal();
 	}
+	if (Command.bSetsCarriedState)
+	{
+		AfterState.bIsCarried = Command.bIsCarried;
+	}
+	AfterState.StateTags.AppendTags(Command.AddedStateTags);
+	AfterState.StateTags.RemoveTags(Command.RemovedStateTags);
 	AfterState.StateVersion = BeforeState.StateVersion + 1;
 
 	FDreamInteractionTransaction Transaction;
@@ -191,6 +228,24 @@ bool UDreamInteractionWorldSubsystem::ExecuteCommand(const FDreamInteractionComm
 		*Assembly->GetAssemblyId().ToString(), *Transaction.TransactionId.ToString(),
 		BeforeState.StateVersion, AfterState.StateVersion);
 	return true;
+}
+
+bool UDreamInteractionWorldSubsystem::ExecuteCommand(const UDreamInteractionCapability& Capability,
+	const FDreamInteractionCommand& Command,
+	FDreamInteractionTransaction* OutTransaction,
+	FText& OutFailure)
+{
+	AInteractiveAssemblyActor* Assembly = FindAssembly(Command.AssemblyId);
+	if (!Assembly)
+	{
+		OutFailure = FText::FromString(TEXT("找不到命令目标装配体。"));
+		return false;
+	}
+	if (!Capability.Validate(*Assembly, Command, OutFailure))
+	{
+		return false;
+	}
+	return ExecuteCommand(Command, OutTransaction, OutFailure);
 }
 
 bool UDreamInteractionWorldSubsystem::UndoLastTransaction(const FGuid& AssemblyId, FText& OutFailure)
@@ -228,6 +283,46 @@ bool UDreamInteractionWorldSubsystem::UndoLastTransaction(const FGuid& AssemblyI
 	return false;
 }
 
+void UDreamInteractionWorldSubsystem::CaptureToSaveGame(UDreamInteractionSaveGame& SaveGame) const
+{
+	SaveGame.AssemblyStates.Reset();
+	for (const TPair<FGuid, TWeakObjectPtr<AInteractiveAssemblyActor>>& Pair : Assemblies)
+	{
+		if (const AInteractiveAssemblyActor* Assembly = Pair.Value.Get())
+		{
+			SaveGame.CaptureAssemblyState(Assembly->AssemblyState);
+		}
+	}
+}
+
+bool UDreamInteractionWorldSubsystem::RestoreFromSaveGame(const UDreamInteractionSaveGame& SaveGame,
+	TArray<FGuid>& OutRestoredIds)
+{
+	OutRestoredIds.Reset();
+	bool bAllRestored = true;
+	for (const FDreamAssemblyState& SavedState : SaveGame.AssemblyStates)
+	{
+		AInteractiveAssemblyActor* Assembly = FindAssembly(SavedState.AssemblyId);
+		if (!Assembly)
+		{
+			bAllRestored = false;
+			continue;
+		}
+		FText Failure;
+		if (Assembly->ApplyState(SavedState, Failure))
+		{
+			OutRestoredIds.Add(SavedState.AssemblyId);
+		}
+		else
+		{
+			bAllRestored = false;
+			UE_LOG(LogDreamInteraction, Warning, TEXT("恢复装配体 %s 失败：%s"),
+				*SavedState.AssemblyId.ToString(), *Failure.ToString());
+		}
+	}
+	return bAllRestored;
+}
+
 bool UDreamInteractionWorldSubsystem::ResolveComponentTarget(const UPrimitiveComponent* HitComponent,
 	AInteractiveAssemblyActor*& OutAssembly,
 	FGuid& OutNodeId) const
@@ -258,3 +353,43 @@ bool UDreamInteractionWorldSubsystem::ResolveComponentTarget(const UPrimitiveCom
 	return false;
 }
 
+bool UDreamInteractionWorldSubsystem::ResolveGravityAtLocation(const FVector& WorldLocation,
+	FVector& OutGravityDirection,
+	FGuid* OutSourceAssemblyId) const
+{
+	OutGravityDirection = FVector::DownVector;
+	if (OutSourceAssemblyId)
+	{
+		OutSourceAssemblyId->Invalidate();
+	}
+
+	const AInteractiveAssemblyActor* BestAssembly = nullptr;
+	int32 BestPriority = TNumericLimits<int32>::Lowest();
+	for (const TPair<FGuid, TWeakObjectPtr<AInteractiveAssemblyActor>>& Pair : Assemblies)
+	{
+		const AInteractiveAssemblyActor* Assembly = Pair.Value.Get();
+		if (!Assembly || !Assembly->AssemblyState.bProvidesGravity ||
+			Assembly->AssemblyState.GravityPriority < BestPriority)
+		{
+			continue;
+		}
+
+		// 通过表现组件的包围盒做轻量的重力体积判断。
+		const FBox Bounds = Assembly->GetComponentsBoundingBox(true);
+		if (Bounds.IsValid && Bounds.IsInsideOrOn(WorldLocation))
+		{
+			BestAssembly = Assembly;
+			BestPriority = Assembly->AssemblyState.GravityPriority;
+		}
+	}
+	if (BestAssembly)
+	{
+		OutGravityDirection = BestAssembly->GetWorldGravityDirection();
+		if (OutSourceAssemblyId)
+		{
+			*OutSourceAssemblyId = BestAssembly->GetAssemblyId();
+		}
+		return true;
+	}
+	return false;
+}
