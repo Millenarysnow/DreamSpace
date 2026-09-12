@@ -1,14 +1,16 @@
 #include "DreamSceneCapturePresentationComponent.h"
 
 #include "Engine/SceneCapture2D.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/TextureRenderTarget2D.h"
-#include "Components/WidgetComponent.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Camera/CameraTypes.h"
+#include "Components/StaticMeshComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Math/RotationMatrix.h"
-#include "Widgets/Images/SImage.h"
+#include "UObject/SoftObjectPath.h"
 
 UDreamSceneCapturePresentationComponent::UDreamSceneCapturePresentationComponent()
 {
@@ -16,6 +18,12 @@ UDreamSceneCapturePresentationComponent::UDreamSceneCapturePresentationComponent
 	// 使用 PostUpdateWork 可以避免读取到上一阶段的携带变换。
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
+	// 用软引用保留默认资产路径，既能在 Details 面板中看到明确配置，
+	// 又不会在组件构造阶段强制同步加载材质和网格。
+	DisplayMeshAsset = TSoftObjectPtr<UStaticMesh>(
+		FSoftObjectPath(TEXT("/Engine/BasicShapes/Plane.Plane")));
+	DisplayMaterialAsset = TSoftObjectPtr<UMaterialInterface>(
+		FSoftObjectPath(TEXT("/Game/DreamInteraction/Materials/M_SceneCaptureDisplay.M_SceneCaptureDisplay")));
 }
 
 void UDreamSceneCapturePresentationComponent::BeginPlay()
@@ -59,12 +67,18 @@ void UDreamSceneCapturePresentationComponent::TickComponent(
 
 void UDreamSceneCapturePresentationComponent::CreatePresentationResources()
 {
-	if (!GetWorld() || CaptureActor || DisplayWidget)
+	if (!GetWorld() || CaptureActor || DisplayMesh)
 		return;
 
 	RenderTarget = NewObject<UTextureRenderTarget2D>(this, TEXT("SceneCaptureRenderTarget"));
-	RenderTarget->RenderTargetFormat = RTF_RGBA8;
-	RenderTarget->ClearColor = CaptureClearColor;
+	// SceneColorHDR 的 Alpha 是反向不透明度，需要使用带 Alpha 的浮点 RT 保存原始结果。
+	RenderTarget->RenderTargetFormat = RTF_RGBA16f;
+	RenderTarget->bForceLinearGamma = true;
+	RenderTarget->AddressX = TA_Clamp;
+	RenderTarget->AddressY = TA_Clamp;
+	RenderTarget->bAutoGenerateMips = false;
+	RenderTarget->ClearColor = FLinearColor(
+		CaptureClearColor.R, CaptureClearColor.G, CaptureClearColor.B, 1.0f);
 	RenderTarget->InitAutoFormat(
 		FMath::Max(RenderTargetWidth, 64), FMath::Max(RenderTargetHeight, 64));
 	RenderTarget->UpdateResourceImmediate(true);
@@ -107,38 +121,64 @@ void UDreamSceneCapturePresentationComponent::CreatePresentationResources()
 		CaptureComponent->HiddenActors.AddUnique(GetOwner());
 	CaptureComponent->HiddenActors.AddUnique(CaptureActor);
 
-	// 使用世界空间 WidgetComponent 作为原型显示面。
-	// 这只是 RenderTarget 的承载方式，不属于玩法 UI，也不会添加到屏幕 HUD。
-	DisplayWidget = NewObject<UWidgetComponent>(GetOwner(), TEXT("SceneCaptureDisplay"), RF_Transient);
-	DisplayWidget->SetMobility(EComponentMobility::Movable);
-	DisplayWidget->SetupAttachment(this);
-	DisplayWidget->SetWidgetSpace(EWidgetSpace::World);
-	DisplayWidget->SetGeometryMode(EWidgetGeometryMode::Plane);
-	DisplayWidget->SetDrawSize(DisplaySize);
-	DisplayWidget->SetPivot(FVector2D(0.5f, 0.5f));
-	DisplayWidget->SetTwoSided(bDisplayTwoSided);
-	DisplayWidget->SetBlendMode(EWidgetBlendMode::Opaque);
-	DisplayWidget->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	DisplayWidget->SetGenerateOverlapEvents(false);
-	DisplayWidget->SetHiddenInGame(true);
-	// 显示面只负责展示捕获结果，不能再次被自己的 SceneCapture 捕获。
-	DisplayWidget->SetHiddenInSceneCapture(true);
-	DisplayWidget->SetRelativeTransform(DisplayRelativeTransform);
-	DisplayWidget->RegisterComponent();
+	// 使用静态平面直接采样 SceneCapture RT。这样材质可以明确执行
+	// Opacity = 1 - RT.A，而不会经过 Slate 的额外渲染目标和透明度处理。
+	DisplayMesh = NewObject<UStaticMeshComponent>(GetOwner(), TEXT("SceneCaptureDisplayMesh"), RF_Transient);
+	DisplayMesh->SetMobility(EComponentMobility::Movable);
+	DisplayMesh->SetupAttachment(this);
+	DisplayMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	DisplayMesh->SetGenerateOverlapEvents(false);
+	DisplayMesh->SetCastShadow(false);
+	DisplayMesh->SetHiddenInGame(true);
+	DisplayMesh->SetHiddenInSceneCapture(true);
+	DisplayMesh->SetRelativeTransform(DisplayRelativeTransform);
 
-	// 直接使用 Slate Image 显示 RenderTarget，避免实例化 UE5.6 中抽象的 UUserWidget。
-	// DisplayBrush 是成员变量，保证 SImage 在组件生命周期内始终能访问有效地址。
-	DisplayBrush = FSlateBrush();
-	DisplayBrush.DrawAs = ESlateBrushDrawType::Image;
-	DisplayBrush.SetResourceObject(RenderTarget);
-	DisplayBrush.ImageSize = DisplaySize;
-	DisplaySlateWidget = SNew(SImage).Image(&DisplayBrush);
-	if (!DisplaySlateWidget.IsValid())
+	UStaticMesh* MeshAsset = DisplayMeshAsset.LoadSynchronous();
+	if (!MeshAsset)
+		MeshAsset = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Plane.Plane"));
+	if (!MeshAsset)
 	{
-		UE_LOG(LogTemp, Error, TEXT("无法创建场景缩略图 Slate Image：%s"), *GetNameSafe(GetOwner()));
+		UE_LOG(LogTemp, Error, TEXT("无法加载场景缩略图显示平面：%s"), *GetNameSafe(GetOwner()));
+		DisplayMesh->DestroyComponent();
+		DisplayMesh = nullptr;
 		return;
 	}
-	DisplayWidget->SetSlateWidget(DisplaySlateWidget);
+	DisplayMesh->SetStaticMesh(MeshAsset);
+
+	// BasicShapes/Plane 默认尺寸约为 100 cm；使用资源 Bounds 计算比例，
+	// 即使后续换成不同原始尺寸的自定义平面，DisplayWorldSize 仍保持厘米语义。
+	const FVector2D BaseExtent(
+		FMath::Max(MeshAsset->GetBounds().BoxExtent.X * 2.0f, 0.01f),
+		FMath::Max(MeshAsset->GetBounds().BoxExtent.Y * 2.0f, 0.01f));
+	FTransform MeshRelative = DisplayRelativeTransform;
+	MeshRelative.SetScale3D(MeshRelative.GetScale3D() * FVector(
+		DisplayWorldSize.X / BaseExtent.X, DisplayWorldSize.Y / BaseExtent.Y, 1.0f));
+	DisplayMesh->SetRelativeTransform(MeshRelative);
+
+	UMaterialInterface* MaterialAsset = DisplayMaterialAsset.LoadSynchronous();
+	if (!MaterialAsset)
+		MaterialAsset = LoadObject<UMaterialInterface>(nullptr,
+			TEXT("/Game/DreamInteraction/Materials/M_SceneCaptureDisplay.M_SceneCaptureDisplay"));
+	if (!MaterialAsset)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("无法加载场景缩略图透明材质；请先运行 EnsureSceneCaptureMaterial：%s"),
+			*GetNameSafe(GetOwner()));
+		DisplayMesh->DestroyComponent();
+		DisplayMesh = nullptr;
+		return;
+	}
+	DisplayMaterialInstance = UMaterialInstanceDynamic::Create(MaterialAsset, this);
+	if (!DisplayMaterialInstance)
+	{
+		UE_LOG(LogTemp, Error, TEXT("无法创建场景缩略图动态材质：%s"), *GetNameSafe(GetOwner()));
+		DisplayMesh->DestroyComponent();
+		DisplayMesh = nullptr;
+		return;
+	}
+	DisplayMaterialInstance->SetTextureParameterValue(DisplayTextureParameterName, RenderTarget);
+	DisplayMesh->SetMaterial(0, DisplayMaterialInstance);
+	DisplayMesh->RegisterComponent();
 }
 
 FTransform UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWorld(
@@ -172,14 +212,12 @@ FTransform UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWo
 
 void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
 {
-	if (DisplayWidget)
+	if (DisplayMesh)
 	{
-		DisplayWidget->SetSlateWidget(nullptr);
-		DisplayWidget->DestroyComponent();
-		DisplayWidget = nullptr;
+		DisplayMesh->DestroyComponent();
+		DisplayMesh = nullptr;
 	}
-	DisplaySlateWidget.Reset();
-	DisplayBrush = FSlateBrush();
+	DisplayMaterialInstance = nullptr;
 
 	if (CaptureActor)
 	{
@@ -192,11 +230,11 @@ void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
 
 void UDreamSceneCapturePresentationComponent::SetPresentationActive(bool bActive)
 {
-	bPresentationActive = bActive && CaptureActor && DisplayWidget && RenderTarget && DisplaySlateWidget.IsValid();
-	if (DisplayWidget)
+	bPresentationActive = bActive && CaptureActor && DisplayMesh && RenderTarget && DisplayMaterialInstance;
+	if (DisplayMesh)
 	{
-		DisplayWidget->SetHiddenInGame(!bPresentationActive);
-		DisplayWidget->SetVisibility(bPresentationActive);
+		DisplayMesh->SetHiddenInGame(!bPresentationActive);
+		DisplayMesh->SetVisibility(bPresentationActive);
 	}
 	if (CaptureActor)
 	{
@@ -308,7 +346,7 @@ FTransform UDreamSceneCapturePresentationComponent::ResolveCapturedSceneReferenc
 
 void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
 {
-	if (!DisplayWidget || DisplayFacingMode == EDreamMiniatureFacingMode::Fixed)
+	if (!DisplayMesh || DisplayFacingMode == EDreamMiniatureFacingMode::Fixed)
 		return;
 
 	FMinimalViewInfo POV;
@@ -332,19 +370,25 @@ void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
 	}
 	else
 	{
-		// 完全面向相机时，把上方向投影到面片所在平面，避免产生滚转跳变。
-		Up = FVector::VectorPlaneProject(Up, ToCamera).GetSafeNormal();
+		// 完全面向相机时优先使用相机自身的上方向，使面片与主视口的画面坐标
+		// 一致；再投影到面片所在平面，避免相机有轻微滚转时出现拉伸或跳变。
+		Up = FVector::VectorPlaneProject(POV.Rotation.RotateVector(FVector::UpVector), ToCamera).GetSafeNormal();
 		if (Up.IsNearlyZero())
 			Up = FVector::VectorPlaneProject(FVector::UpVector, ToCamera).GetSafeNormal();
 		if (Up.IsNearlyZero())
 			return;
 	}
 
-	// UWidgetComponent 的 Plane 几何体局部 -Y 是正面法线，
-	// 所以让世界 Y 指向 -ToCamera，局部 -Y 就会朝向观察者。
-	const FQuat FacingRotation = FRotationMatrix::MakeFromYZ(-ToCamera, Up).ToQuat();
-	FTransform DisplayWorld(FacingRotation, DisplayLocation, DisplayRelativeTransform.GetScale3D());
-	DisplayWidget->SetWorldTransform(DisplayWorld);
+	// BasicShapes/Plane 的局部 +Z 是正面法线，所以让世界 Z 指向观察者。
+	// X 轴取“上方向 x 法线”，可以稳定地保留面片的竖直方向。
+	FVector Right = Up.Cross(ToCamera).GetSafeNormal();
+	if (Right.IsNearlyZero())
+		return;
+	const FQuat FacingRotation = FRotationMatrix::MakeFromXZ(Right, ToCamera).ToQuat();
+	// 保留 CreatePresentationResources 根据 Mesh Bounds 和 DisplayWorldSize 算出的真实尺寸。
+	const FVector WorldScale = DisplayMesh->GetComponentScale();
+	FTransform DisplayWorld(FacingRotation, DisplayLocation, WorldScale);
+	DisplayMesh->SetWorldTransform(DisplayWorld);
 }
 
 void UDreamSceneCapturePresentationComponent::CaptureOnce()
@@ -364,7 +408,7 @@ void UDreamSceneCapturePresentationComponent::CaptureOnce()
 
 void UDreamSceneCapturePresentationComponent::RefreshCaptureNow()
 {
-	if (!CaptureActor || !DisplayWidget)
+	if (!CaptureActor || !DisplayMesh)
 		return;
 
 	UpdateCaptureBlacklist();

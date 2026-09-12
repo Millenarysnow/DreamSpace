@@ -2,13 +2,14 @@
 
 #include "Components/SceneComponent.h"
 #include "Components/SceneCaptureComponent2D.h"
-#include "Styling/SlateBrush.h"
 #include "DreamSceneCapturePresentationComponent.generated.h"
 
 class ASceneCapture2D;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
+class UStaticMesh;
+class UStaticMeshComponent;
 class UTextureRenderTarget2D;
-class UWidgetComponent;
-class SWidget;
 
 /** SceneCapture 显示面如何相对观察相机转向。 */
 UENUM(BlueprintType)
@@ -31,9 +32,9 @@ enum class EDreamMiniatureFacingMode : uint8
  * - 启用时创建 SceneCapture2D、RenderTarget 和世界空间显示面；
  * - 可以作为角色组件挂到身体、手部骨骼 Socket 或其他表现 Actor 上。
  *
- * 当前版本使用 UWidgetComponent 显示 RenderTarget，避免要求项目立刻创建
- * 一个带 Texture 参数的材质资产。后续需要门户材质、深度遮罩或三维外壳时，
- * 可以在不改变捕获逻辑的情况下替换 DisplayWidget 的承载方式。
+ * 当前版本使用一个带透明材质的静态平面直接采样 RenderTarget，避免 Slate
+ * 中间层吞掉 SceneCapture 的 Alpha。后续需要门户材质或三维外壳时，
+ * 可以替换 DisplayMeshAsset 和 DisplayMaterialAsset，不需要改捕获数学。
  */
 UCLASS(ClassGroup = (DreamPresentation), meta = (BlueprintSpawnableComponent))
 class DREAMSPACE_API UDreamSceneCapturePresentationComponent : public USceneComponent
@@ -72,7 +73,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float AutoFramePadding = 1.25f;
 
-	/** 捕获相机到目标中心的距离；没有配置取景 Actor 时使用此值。 */
+	/** 捕获相机到目标中心的距离；未跟随玩家相机时作为固定取景距离。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float CaptureDistance = 2400.0f;
 
@@ -118,11 +119,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
 	FRotator CaptureRotation = FRotator(-35.0f, -45.0f, 0.0f);
 
-	/** 捕获输出类型。FinalColorLDR 便于直接显示；后续合成可改用 SceneColorHDR。 */
+	/** 捕获输出类型；透明显示默认依赖 SceneColorHDR 的反向不透明度。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
-	TEnumAsByte<ESceneCaptureSource> CaptureSource = SCS_FinalColorLDR;
+	TEnumAsByte<ESceneCaptureSource> CaptureSource = SCS_SceneColorHDR;
 
-	/** RenderTarget 清屏颜色；如果黑名单没有排除天空，天空仍可能覆盖此颜色。 */
+	/** RenderTarget 清屏 RGB；Alpha 始终按 SceneColorHDR 的反向不透明度约定清为 1。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
 	FLinearColor CaptureClearColor = FLinearColor::Black;
 
@@ -144,13 +145,21 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
 	FTransform DisplayRelativeTransform = FTransform(FRotator::ZeroRotator, FVector(0, 0, 60));
 
-	/** 世界空间显示面的绘制尺寸，单位为 UMG 画布像素。 */
+	/** 显示平面的世界尺寸，单位为厘米；平面资源的原始尺寸会自动换算。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示", meta = (ClampMin = "1", UIMin = "1"))
-	FVector2D DisplaySize = FVector2D(512.0f, 512.0f);
+	FVector2D DisplayWorldSize = FVector2D(80.0f, 80.0f);
 
-	/** 是否双面显示；原型阶段开启，避免因模型朝向造成画面消失。 */
+	/** 显示平面资源；默认使用 UE 基础 Plane，后续可以替换为自定义手办外壳。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
-	bool bDisplayTwoSided = true;
+	TSoftObjectPtr<UStaticMesh> DisplayMeshAsset;
+
+	/** 透明显示材质；参数名由 DisplayTextureParameterName 指定。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
+	TSoftObjectPtr<UMaterialInterface> DisplayMaterialAsset;
+
+	/** 材质中接收 SceneCapture RenderTarget 的纹理参数名。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
+	FName DisplayTextureParameterName = TEXT("SceneCaptureTexture");
 
 	/** 面片是否跟随第三人称观察相机转向；它只改变显示面，不改变 SceneCapture 坐标映射。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
@@ -196,15 +205,13 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UTextureRenderTarget2D> RenderTarget;
 
-	/** 将输出纹理放到世界中的显示面。 */
+	/** 将输出纹理直接显示在世界空间平面上的静态网格。 */
 	UPROPERTY(Transient)
-	TObjectPtr<UWidgetComponent> DisplayWidget;
+	TObjectPtr<UStaticMeshComponent> DisplayMesh;
 
-	/** 世界空间显示面内部的 Slate 图像；它直接引用 RenderTarget。 */
-	TSharedPtr<SWidget> DisplaySlateWidget;
-
-	/** Slate Image 使用的画刷必须由组件持有，不能使用 CreatePresentationResources 的局部变量。 */
-	FSlateBrush DisplayBrush;
+	/** 运行时材质实例，用于把 RenderTarget 绑定到透明材质参数。 */
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> DisplayMaterialInstance;
 
 	bool bPresentationActive = false;
 

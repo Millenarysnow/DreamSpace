@@ -8,6 +8,7 @@
 #include "DreamInteractionPlayerSubsystem.h"
 #include "DreamInteractionWorldSubsystem.h"
 #include "DreamInteractionTargetResolver.h"
+#include "DreamSceneCapturePresentationComponent.h"
 #include "InteractiveAssemblyActor.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerInput.h"
@@ -78,6 +79,15 @@ public:
 					EDreamInteractionMode::Overview, Target, Character));
 			Test->TestTrue(TEXT("Selected cube exposes inherited capabilities"), Target.Capabilities.Num() > 0);
 			InitialPosition = Character->GetActorLocation();
+			Test->TestNotNull(TEXT("Third person owns independent scene miniature presentation"), Character->SceneMiniature.Get());
+			if (Character->SceneMiniature)
+			{
+				Test->TestTrue(TEXT("Scene miniature presentation is active"), Character->SceneMiniature->IsPresentationActive());
+				Test->TestNotNull(TEXT("Scene miniature has a render target"), Character->SceneMiniature->GetRenderTarget());
+			}
+			if (FParse::Param(FCommandLine::Get(), TEXT("DreamCapture")))
+				FScreenshotRequest::RequestScreenshot(
+					FPaths::ProjectSavedDir() / TEXT("Screenshots/DreamSceneMiniatureThirdPerson.png"), false, false);
 			Player->SetSelection(Room->AssemblyId, FGuid());
 			Press(EKeys::Tab);
 			break;

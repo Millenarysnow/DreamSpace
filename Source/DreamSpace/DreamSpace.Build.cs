@@ -6,9 +6,8 @@ public class DreamSpace : ModuleRules
  public DreamSpace(ReadOnlyTargetRules Target) : base(Target)
  {
   PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
-  // 场景缩略图表现使用 UWidgetComponent 承载 RenderTarget，因此需要 UMG。
-  // 该依赖只属于表现层，不会改变交互运行时的状态和事务边界。
-  PublicDependencyModuleNames.AddRange(new string[]{"Core","CoreUObject","Engine","InputCore","GameplayTags","EnhancedInput","UMG","Slate","SlateCore"});
+  // 场景缩略图使用引擎静态网格和动态材质直接显示 RenderTarget，不引入玩法依赖。
+  PublicDependencyModuleNames.AddRange(new string[]{"Core","CoreUObject","Engine","InputCore","GameplayTags","EnhancedInput"});
   // 当前保留一个运行时模块，但按职责划分公开接口；交互层不包含游戏/表现层头文件。
   foreach (string Area in new string[]{"Interaction","Gameplay","Presentation","Examples"})
    PublicIncludePaths.Add(Path.Combine(ModuleDirectory,"Public",Area));

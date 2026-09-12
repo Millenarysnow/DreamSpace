@@ -52,7 +52,9 @@ bool SaveSceneCaptureDisplayMaterial(const FString& BasePath)
 	auto* SceneTexture = NewObject<UMaterialExpressionTextureSampleParameter2D>(Material);
 	SceneTexture->ParameterName = TEXT("SceneCaptureTexture");
 	SceneTexture->ExpressionGUID = FGuid::NewGuid();
-	SceneTexture->SamplerType = SAMPLERTYPE_LinearColor;
+	// 默认纹理是引擎的普通 Color 纹理；运行时替换为 RGBA16f RenderTarget 后，
+	// RenderTarget 自身的线性设置会决定采样结果，使用 Color 才能通过材质编译校验。
+	SceneTexture->SamplerType = SAMPLERTYPE_Color;
 	SceneTexture->Texture = LoadObject<UTexture2D>(
 		nullptr, TEXT("/Engine/EngineResources/DefaultTexture.DefaultTexture"));
 	SceneTexture->MaterialExpressionEditorX = -320;
