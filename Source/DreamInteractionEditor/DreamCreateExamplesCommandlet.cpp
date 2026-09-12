@@ -22,6 +22,65 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionVectorParameter.h"
 #include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionTextureSampleParameter2D.h"
+#include "Materials/MaterialExpressionOneMinus.h"
+
+namespace
+{
+/**
+ * 创建场景缩略图显示材质。
+ *
+ * SceneCapture 的 SCS_SceneColorHDR 输出约定为：RGB 保存场景颜色，A 保存反向不透明度。
+ * 因此材质必须把 RGB 作为已完成光照的 Emissive 使用，并将 OneMinus(A) 接到 Opacity。
+ * 这里生成独立资产，运行时只创建 MID 和设置 RenderTarget，不依赖编辑器材质编译能力。
+ */
+bool SaveSceneCaptureDisplayMaterial(const FString& BasePath)
+{
+	const FString PackageName = BasePath + TEXT("Materials/M_SceneCaptureDisplay");
+	auto* Package = CreatePackage(*PackageName);
+	Package->MarkAsFullyLoaded();
+	auto* Material = NewObject<UMaterial>(
+		Package, TEXT("M_SceneCaptureDisplay"), RF_Public | RF_Standalone);
+	if (!Material)
+		return false;
+
+	Material->MaterialDomain = MD_Surface;
+	Material->BlendMode = BLEND_Translucent;
+	Material->TwoSided = true;
+	Material->SetShadingModel(MSM_Unlit);
+
+	auto* SceneTexture = NewObject<UMaterialExpressionTextureSampleParameter2D>(Material);
+	SceneTexture->ParameterName = TEXT("SceneCaptureTexture");
+	SceneTexture->ExpressionGUID = FGuid::NewGuid();
+	SceneTexture->SamplerType = SAMPLERTYPE_LinearColor;
+	SceneTexture->Texture = LoadObject<UTexture2D>(
+		nullptr, TEXT("/Engine/EngineResources/DefaultTexture.DefaultTexture"));
+	SceneTexture->MaterialExpressionEditorX = -320;
+	SceneTexture->MaterialExpressionEditorY = 0;
+	Material->GetExpressionCollection().AddExpression(SceneTexture);
+
+	auto* InvertOpacity = NewObject<UMaterialExpressionOneMinus>(Material);
+	InvertOpacity->MaterialExpressionEditorX = -80;
+	InvertOpacity->MaterialExpressionEditorY = 180;
+	Material->GetExpressionCollection().AddExpression(InvertOpacity);
+
+	// TextureSample 输出 0 是 RGB，输出 4 是 A。A 为反向不透明度，所以先经过 OneMinus。
+	SceneTexture->ConnectExpression(&Material->GetEditorOnlyData()->EmissiveColor, 0);
+	SceneTexture->ConnectExpression(&InvertOpacity->Input, 4);
+	InvertOpacity->ConnectExpression(&Material->GetEditorOnlyData()->Opacity, 0);
+
+	Material->PostEditChange();
+	FAssetRegistryModule::AssetCreated(Material);
+	Package->MarkPackageDirty();
+
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	const FString Filename =
+		FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
+	IFileManager::Get().MakeDirectory(*FPaths::GetPath(Filename), true);
+	return UPackage::SavePackage(Package, Material, *Filename, SaveArgs);
+}
+}
 
 UDreamCreateExamplesCommandlet::UDreamCreateExamplesCommandlet()
 {
@@ -33,6 +92,14 @@ UDreamCreateExamplesCommandlet::UDreamCreateExamplesCommandlet()
 int32 UDreamCreateExamplesCommandlet::Main(const FString& Params)
 {
 	const FString Base = TEXT("/Game/DreamInteraction/");
+	// 单独生成缩略图材质，不触碰现有定义资产和地图。
+	// 这样表现层迭代不需要使用 -ReplaceExamples 覆盖策划已经调整过的示例内容。
+	if (FParse::Param(*Params, TEXT("EnsureSceneCaptureMaterial")))
+	{
+		const bool bSaved = SaveSceneCaptureDisplayMaterial(Base);
+		UE_LOG(LogTemp, Display, TEXT("场景缩略图透明材质生成：%s"), bSaved ? TEXT("成功") : TEXT("失败"));
+		return bSaved ? 0 : 1;
+	}
 	if (FPackageName::DoesPackageExist(Base + TEXT("Maps/InteractionDemo")) &&
 		!FParse::Param(*Params, TEXT("ReplaceExamples")))
 	{
@@ -61,6 +128,8 @@ int32 UDreamCreateExamplesCommandlet::Main(const FString& Params)
 		FPackageName::LongPackageNameToFilename(MaterialPackageName, FPackageName::GetAssetPackageExtension());
 	IFileManager::Get().MakeDirectory(*FPaths::GetPath(MaterialFile), true);
 	if (!UPackage::SavePackage(MaterialPackage, Material, *MaterialFile, MaterialArgs))
+		return 1;
+	if (!SaveSceneCaptureDisplayMaterial(Base))
 		return 1;
 	auto SaveAsset = [&](FString Name, auto Populate) -> UInteractiveAssemblyDefinition*
 	{
