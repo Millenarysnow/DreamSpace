@@ -3,8 +3,11 @@
 #include "Engine/SceneCapture2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Components/WidgetComponent.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Camera/CameraTypes.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Math/RotationMatrix.h"
 #include "Widgets/Images/SImage.h"
 
 UDreamSceneCapturePresentationComponent::UDreamSceneCapturePresentationComponent()
@@ -47,9 +50,10 @@ void UDreamSceneCapturePresentationComponent::TickComponent(
 
 	if (bPresentationActive)
 	{
-		// 每帧更新捕获相机的位置和过滤列表；SceneCapture 自己负责在渲染阶段捕获。
+		// 每帧更新捕获相机的位置、面片朝向和过滤列表；SceneCapture 自己负责在渲染阶段捕获。
 		UpdateCaptureBlacklist();
 		UpdateCaptureView();
+		UpdateDisplayFacing();
 	}
 }
 
@@ -137,6 +141,35 @@ void UDreamSceneCapturePresentationComponent::CreatePresentationResources()
 	DisplayWidget->SetSlateWidget(DisplaySlateWidget);
 }
 
+FTransform UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWorld(
+	const FTransform& ObserverWorldTransform,
+	const FTransform& MiniatureFrameWorldTransform,
+	const FTransform& CapturedSceneReferenceWorldTransform,
+	float InMiniatureSceneScale)
+{
+	// UE 的 FTransform 乘法约定是“左侧变换先应用，再应用右侧变换”。
+	// 因此这里不直接写一串容易读反的乘法，而是明确拆成三个坐标步骤：
+	//
+	// 1. 外部观察相机 -> 手办局部坐标；
+	// 2. 除以手办缩放，把手办中的相对距离还原到真实场景单位；
+	// 3. 手办局部坐标 -> 捕获场景的真实世界坐标。
+	//
+	// 若手办比例为 0.1，观察相机离手办中心 100 cm，SceneCapture 就会在
+	// 捕获场景中离参考原点约 1000 cm 的对应位置，从而产生正确的透视视差。
+	const float Scale = FMath::Max(FMath::Abs(InMiniatureSceneScale), KINDA_SMALL_NUMBER);
+
+	FTransform MiniatureFrame = MiniatureFrameWorldTransform;
+	// 手办坐标系的比例由显式参数控制；去掉组件继承的 Actor 缩放，避免重复缩放。
+	MiniatureFrame.SetScale3D(FVector::OneVector);
+
+	FTransform CameraInMiniature = ObserverWorldTransform.GetRelativeTransform(MiniatureFrame);
+	CameraInMiniature.SetLocation(CameraInMiniature.GetLocation() / Scale);
+	CameraInMiniature.SetScale3D(FVector::OneVector);
+
+	// 将缩放后的相机从手办局部坐标放回捕获场景参考坐标。
+	return CameraInMiniature * CapturedSceneReferenceWorldTransform;
+}
+
 void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
 {
 	if (DisplayWidget)
@@ -203,6 +236,31 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 	if (!CaptureActor || !GetWorld())
 		return;
 
+	FMinimalViewInfo PlayerPOV;
+	if (bFollowPlayerCamera && GetPlayerCameraPOV(PlayerPOV))
+	{
+		// 这里的 MiniatureFrame 是“手办局部坐标 -> 外部真实世界”的锚点，
+		// 而不是显示面本身。SceneCapture 最终仍接收一个真实世界 Transform。
+		const FTransform ObserverWorld(PlayerPOV.Rotation, PlayerPOV.Location);
+		const FTransform MiniatureFrame = GetComponentTransform();
+		const FTransform SceneReference = ResolveCapturedSceneReference();
+		const FTransform CaptureWorld = MapObserverCameraToCaptureWorld(
+			ObserverWorld, MiniatureFrame, SceneReference, MiniatureSceneScale);
+
+		CaptureActor->SetActorTransform(CaptureWorld);
+		if (USceneCaptureComponent2D* CaptureComponent = CaptureActor->GetCaptureComponent2D())
+		{
+			// 均匀缩放不会改变透视 FOV；同步投影模式和 FOV 可以避免观察相机切换
+			// 或第三人称镜头调整时，手办画面仍使用旧投影参数。
+			CaptureComponent->ProjectionType = PlayerPOV.ProjectionMode;
+			if (PlayerPOV.ProjectionMode == ECameraProjectionMode::Perspective)
+				CaptureComponent->FOVAngle = PlayerPOV.FOV;
+			else
+				CaptureComponent->OrthoWidth = PlayerPOV.OrthoWidth;
+		}
+		return;
+	}
+
 	FBox SceneBounds(ForceInit);
 
 	if (IsValid(CaptureTargetActor))
@@ -221,17 +279,72 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 	Target += CaptureTargetOffset;
 
 	FRotator Rotation = CaptureRotation;
-	if (bUsePlayerCameraRotation)
-		if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
-			if (PC->PlayerCameraManager)
-				Rotation = PC->PlayerCameraManager->GetCameraRotation();
-
 	const float HalfFOVRadians = FMath::DegreesToRadians(FMath::Clamp(CaptureFOV, 5.0f, 170.0f) * 0.5f);
 	const float FrustumDistance = Radius / FMath::Max(FMath::Tan(HalfFOVRadians), 0.001f) * AutoFramePadding;
 	const float Distance = SceneBounds.IsValid ? FrustumDistance : CaptureDistance;
 	const FVector Location = Target - Rotation.Vector() * Distance;
 
 	CaptureActor->SetActorLocationAndRotation(Location, Rotation);
+}
+
+bool UDreamSceneCapturePresentationComponent::GetPlayerCameraPOV(FMinimalViewInfo& OutPOV) const
+{
+	if (!GetWorld())
+		return false;
+	const APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
+	if (!PC || !PC->PlayerCameraManager)
+		return false;
+	OutPOV = PC->PlayerCameraManager->GetCameraCacheView();
+	return true;
+}
+
+FTransform UDreamSceneCapturePresentationComponent::ResolveCapturedSceneReference() const
+{
+	// 参考 Actor 适合场景有明确根节点的关卡；没有配置时，显式 Transform 默认就是世界坐标系。
+	return IsValid(CapturedSceneReferenceActor)
+		? CapturedSceneReferenceActor->GetActorTransform()
+		: CapturedSceneReferenceTransform;
+}
+
+void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
+{
+	if (!DisplayWidget || DisplayFacingMode == EDreamMiniatureFacingMode::Fixed)
+		return;
+
+	FMinimalViewInfo POV;
+	if (!GetPlayerCameraPOV(POV))
+		return;
+
+	// 先按组件坐标计算显示面位置，保持它相对手部锚点的偏移不变。
+	const FTransform ComponentWorld = GetComponentTransform();
+	const FVector DisplayLocation = ComponentWorld.TransformPosition(DisplayRelativeTransform.GetLocation());
+	FVector ToCamera = (POV.Location - DisplayLocation).GetSafeNormal();
+	if (ToCamera.IsNearlyZero())
+		return;
+
+	FVector Up = DisplayUpDirection.GetSafeNormal();
+	if (DisplayFacingMode == EDreamMiniatureFacingMode::FaceCameraAroundWorldUp)
+	{
+		// 圆柱 Billboard：只在指定上方向的平面内转动，避免镜头从头顶/脚底看时翻面。
+		ToCamera = FVector::VectorPlaneProject(ToCamera, Up).GetSafeNormal();
+		if (ToCamera.IsNearlyZero())
+			return;
+	}
+	else
+	{
+		// 完全面向相机时，把上方向投影到面片所在平面，避免产生滚转跳变。
+		Up = FVector::VectorPlaneProject(Up, ToCamera).GetSafeNormal();
+		if (Up.IsNearlyZero())
+			Up = FVector::VectorPlaneProject(FVector::UpVector, ToCamera).GetSafeNormal();
+		if (Up.IsNearlyZero())
+			return;
+	}
+
+	// UWidgetComponent 的 Plane 几何体局部 -Y 是正面法线，
+	// 所以让世界 Y 指向 -ToCamera，局部 -Y 就会朝向观察者。
+	const FQuat FacingRotation = FRotationMatrix::MakeFromYZ(-ToCamera, Up).ToQuat();
+	FTransform DisplayWorld(FacingRotation, DisplayLocation, DisplayRelativeTransform.GetScale3D());
+	DisplayWidget->SetWorldTransform(DisplayWorld);
 }
 
 void UDreamSceneCapturePresentationComponent::CaptureOnce()

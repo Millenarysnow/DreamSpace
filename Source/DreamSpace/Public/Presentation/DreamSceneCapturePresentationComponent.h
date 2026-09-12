@@ -10,6 +10,18 @@ class UTextureRenderTarget2D;
 class UWidgetComponent;
 class SWidget;
 
+/** SceneCapture 显示面如何相对观察相机转向。 */
+UENUM(BlueprintType)
+enum class EDreamMiniatureFacingMode : uint8
+{
+	/** 保持 DisplayRelativeTransform 中配置的固定方向。 */
+	Fixed,
+	/** 完整绕三个轴朝向观察相机，适合先验证捕获视差。 */
+	FaceCamera,
+	/** 只绕世界竖直轴转向观察相机，避免面片上下翻转。 */
+	FaceCameraAroundWorldUp
+};
+
 /**
  * 将当前世界渲染成可放在玩家手部或其他表现节点上的场景缩略图。
  *
@@ -64,6 +76,32 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float CaptureDistance = 2400.0f;
 
+	/**
+	 * 真实场景映射到手办空间时使用的统一缩放。
+	 *
+	 * 例如 0.1 表示真实场景中的 100 cm，在手办中占 10 cm。
+	 * 这个值会参与观察相机位置换算，不能只拿来缩放显示面，否则不会产生正确视差。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (ClampMin = "0.001", UIMin = "0.001"))
+	float MiniatureSceneScale = 0.25f;
+
+	/**
+	 * 捕获场景的参考坐标系到真实世界的变换。
+	 *
+	 * SceneCapture 最终仍然需要一个真实世界 Transform。计算过程先把外部相机
+	 * 变换到手办坐标，再通过这个参考系还原到实际场景世界坐标。默认值为世界原点。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
+	FTransform CapturedSceneReferenceTransform = FTransform::Identity;
+
+	/** 可选的参考 Actor；设置后优先使用它的世界变换作为捕获场景参考系。 */
+	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|坐标映射")
+	TObjectPtr<AActor> CapturedSceneReferenceActor;
+
+	/** 是否让 SceneCapture 跟随第三人称相机的完整位置、旋转和视场角。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
+	bool bFollowPlayerCamera = true;
+
 	/** 自动取景时额外加到场景中心上的世界空间偏移。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
 	FVector CaptureTargetOffset = FVector::ZeroVector;
@@ -79,10 +117,6 @@ public:
 	/** 未启用跟随玩家相机时，捕获相机使用的世界旋转。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
 	FRotator CaptureRotation = FRotator(-35.0f, -45.0f, 0.0f);
-
-	/** 为调试或特定关卡使用当前玩家相机旋转；位置仍由自动取景计算。 */
-	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
-	bool bUsePlayerCameraRotation = false;
 
 	/** 捕获输出类型。FinalColorLDR 便于直接显示；后续合成可改用 SceneColorHDR。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
@@ -118,6 +152,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
 	bool bDisplayTwoSided = true;
 
+	/** 面片是否跟随第三人称观察相机转向；它只改变显示面，不改变 SceneCapture 坐标映射。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
+	EDreamMiniatureFacingMode DisplayFacingMode = EDreamMiniatureFacingMode::FaceCamera;
+
+	/** 面片转向时使用的上方向；当前原型固定为世界上方向。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
+	FVector DisplayUpDirection = FVector::UpVector;
+
 	/** 立即重建黑名单、更新相机姿态并请求一次捕获；调试或运行时改变配置时可调用。 */
 	UFUNCTION(BlueprintCallable, Category = "场景缩略图")
 	void RefreshCaptureNow();
@@ -125,6 +167,17 @@ public:
 	/** 由相机导演或其他表现逻辑控制显示，不改变任何玩法状态。 */
 	UFUNCTION(BlueprintCallable, Category = "场景缩略图")
 	void SetPresentationEnabled(bool bEnabled);
+
+	/**
+	 * 将外部世界中的观察相机映射到 SceneCapture 所在的真实世界。
+	 * 该纯函数保留在公开接口中，便于自动化测试和后续相机导演复用同一套数学。
+	 */
+	UFUNCTION(BlueprintPure, Category = "场景缩略图|坐标映射")
+	static FTransform MapObserverCameraToCaptureWorld(
+		const FTransform& ObserverWorldTransform,
+		const FTransform& MiniatureFrameWorldTransform,
+		const FTransform& CapturedSceneReferenceWorldTransform,
+		float InMiniatureSceneScale);
 
 	/** 返回当前输出纹理，供后续门户材质或其他表现组件复用。 */
 	UFUNCTION(BlueprintPure, Category = "场景缩略图")
@@ -159,6 +212,9 @@ private:
 	void DestroyPresentationResources();
 	void SetPresentationActive(bool bActive);
 	void UpdateCaptureView();
+	void UpdateDisplayFacing();
 	void UpdateCaptureBlacklist();
 	void CaptureOnce();
+	bool GetPlayerCameraPOV(FMinimalViewInfo& OutPOV) const;
+	FTransform ResolveCapturedSceneReference() const;
 };
