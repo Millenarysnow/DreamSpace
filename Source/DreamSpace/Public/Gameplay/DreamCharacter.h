@@ -2,6 +2,7 @@
 #include "GameFramework/Character.h"
 #include "DreamCharacter.generated.h"
 class UDreamOccupantComponent;
+class UDreamSceneCapturePresentationComponent;
 class USpringArmComponent;
 class UCameraComponent;
 /** 原生第三人称角色；移动轴来自相机在当前重力平面上的投影。 */
@@ -18,4 +19,10 @@ public:
 	TObjectPtr<USpringArmComponent> CameraBoom;
 	UPROPERTY(VisibleAnywhere, Category = "相机")
 	TObjectPtr<UCameraComponent> FollowCamera;
+	/**
+	 * 玩家手中当前世界的场景缩略图表现。
+	 * 这是独立的 SceneCapture/RenderTarget 组件，不参与拾取、事务或交互状态。
+	 */
+	UPROPERTY(VisibleAnywhere, Category = "表现")
+	TObjectPtr<UDreamSceneCapturePresentationComponent> SceneMiniature;
 };

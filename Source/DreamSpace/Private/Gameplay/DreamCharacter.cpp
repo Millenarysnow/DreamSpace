@@ -1,5 +1,6 @@
 #include "DreamCharacter.h"
 #include "DreamOccupantComponent.h"
+#include "DreamSceneCapturePresentationComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -26,6 +27,12 @@ ADreamCharacter::ADreamCharacter()
 	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bConstrainAspectRatio = false;
+	// 原生原型角色没有手部骨骼，先把组件放在角色右前方作为手持位置占位。
+	// 后续换成带骨骼的角色时，只需把该组件重新 Attach 到手部 Socket。
+	SceneMiniature = CreateDefaultSubobject<UDreamSceneCapturePresentationComponent>(TEXT("SceneMiniature"));
+	SceneMiniature->SetupAttachment(GetCapsuleComponent());
+	SceneMiniature->SetRelativeLocation(FVector(75.0f, 55.0f, 35.0f));
+	SceneMiniature->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
 	// 开发角色使用引擎基础模型，不依赖项目中的角色蓝图或动画蓝图。
 	auto* Body = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Body"));
 	Body->SetupAttachment(GetCapsuleComponent());
