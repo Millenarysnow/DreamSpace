@@ -99,6 +99,22 @@ public:
 	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|坐标映射")
 	TObjectPtr<AActor> CapturedSceneReferenceActor;
 
+	/**
+	 * 可选的相机轨道锚点。
+	 *
+	 * 这个 Actor 应放在“被捕获的真实场景”里，位置就是手办内部希望稳定的
+	 * 取景中心。设置后会自动使用它作为捕获参考原点；外部第三人称相机相对
+	 * 手办的位移会换算成围绕该 Actor 的内层相机位移，因此玩家移动不会把
+	 * 手办画面的中心一起拖走。运行时会自动隐藏该 Actor，并把它加入捕获黑名单。
+	 * 可以直接使用关卡中的 Empty Actor，不需要新增玩法逻辑。
+	 */
+	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|相机锚点")
+	TObjectPtr<AActor> CameraOrbitAnchorActor;
+
+	/** 是否让启用锚点后的内层相机始终朝向锚点位置，保持手办中心稳定。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|相机锚点")
+	bool bAimCaptureCameraAtOrbitAnchor = true;
+
 	/** 是否让 SceneCapture 跟随第三人称相机的完整位置、旋转和视场角。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	bool bFollowPlayerCamera = true;

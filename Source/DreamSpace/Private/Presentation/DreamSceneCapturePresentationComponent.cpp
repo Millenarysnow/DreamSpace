@@ -37,6 +37,11 @@ void UDreamSceneCapturePresentationComponent::BeginPlay()
 		return;
 	}
 
+	// 相机锚点是纯表现层的辅助 Actor。它可以保留在关卡中作为可视化定位点，
+	// 进入游戏后隐藏，避免定位用的图标或临时网格出现在玩家视口里。
+	if (IsValid(CameraOrbitAnchorActor))
+		CameraOrbitAnchorActor->SetActorHiddenInGame(true);
+
 	CreatePresentationResources();
 	SetPresentationActive(bEnabledAtBeginPlay);
 
@@ -279,8 +284,15 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
 		CaptureComponent->HideActorComponents(Actor, true);
 	};
 	if (bHideOwnerActor)
-		CaptureComponent->HiddenActors.AddUnique(GetOwner());
-	CaptureComponent->HiddenActors.AddUnique(CaptureActor);
+		HideActor(GetOwner());
+	HideActor(CaptureActor);
+	if (IsValid(CameraOrbitAnchorActor))
+	{
+		// 运行时允许蓝图或关卡脚本重新指定锚点，所以这里每次刷新时都再次确保
+		// 它对主视口和 SceneCapture 都不可见。
+		CameraOrbitAnchorActor->SetActorHiddenInGame(true);
+		HideActor(CameraOrbitAnchorActor);
+	}
 
 	for (AActor* Actor : ActorsToHideFromCapture)
 		HideActor(Actor);
@@ -301,8 +313,23 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 		const FTransform SceneReference = ResolveCapturedSceneReference();
 		const FTransform CaptureWorld = MapObserverCameraToCaptureWorld(
 			ObserverWorld, MiniatureFrame, SceneReference, MiniatureSceneScale);
+		FTransform FinalCaptureWorld = CaptureWorld;
+		if (IsValid(CameraOrbitAnchorActor) && bAimCaptureCameraAtOrbitAnchor)
+		{
+			const FVector ToAnchor =
+				(CameraOrbitAnchorActor->GetActorLocation() - CaptureWorld.GetLocation()).GetSafeNormal();
+			if (!ToAnchor.IsNearlyZero())
+			{
+				// 位置仍由外部观察相机经过缩放映射得到，保证环绕半径和视差正确；
+				// 这里只把朝向约束到锚点，避免内层画面中心随着玩家移动漂移。
+				FRotator AnchorRotation = ToAnchor.Rotation();
+				// 保留外部相机的滚转，避免相机导演有 Roll 时画面突然归零。
+				AnchorRotation.Roll = CaptureWorld.Rotator().Roll;
+				FinalCaptureWorld.SetRotation(AnchorRotation.Quaternion());
+			}
+		}
 
-		CaptureActor->SetActorTransform(CaptureWorld);
+		CaptureActor->SetActorTransform(FinalCaptureWorld);
 		if (USceneCaptureComponent2D* CaptureComponent = CaptureActor->GetCaptureComponent2D())
 		{
 			// 均匀缩放不会改变透视 FOV；同步投影模式和 FOV 可以避免观察相机切换
@@ -355,6 +382,16 @@ bool UDreamSceneCapturePresentationComponent::GetPlayerCameraPOV(FMinimalViewInf
 
 FTransform UDreamSceneCapturePresentationComponent::ResolveCapturedSceneReference() const
 {
+	// 相机轨道锚点优先级最高：它同时定义手办内部的稳定中心和捕获相机的轨道原点。
+	// 没有锚点时再沿用原有的参考 Actor/Transform 配置，保证旧关卡行为不变。
+	if (IsValid(CameraOrbitAnchorActor))
+	{
+		FTransform AnchorTransform = CameraOrbitAnchorActor->GetActorTransform();
+		// 锚点的缩放只用于编辑器可视化，不应再次改变真实场景的坐标比例。
+		AnchorTransform.SetScale3D(FVector::OneVector);
+		return AnchorTransform;
+	}
+
 	// 参考 Actor 适合场景有明确根节点的关卡；没有配置时，显式 Transform 默认就是世界坐标系。
 	return IsValid(CapturedSceneReferenceActor)
 		? CapturedSceneReferenceActor->GetActorTransform()
