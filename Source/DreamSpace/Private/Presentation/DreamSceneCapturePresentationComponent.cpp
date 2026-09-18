@@ -256,17 +256,34 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
 	if (!CaptureComponent)
 		return;
 
+	// 大气、云和雾由独立渲染通道生成，不属于 HiddenActors 能剔除的普通网格。
+	// 只修改这台捕获相机的 ShowFlags；不隐藏真实世界的天空，也不关闭 SkyLighting，
+	// 因此主视口仍有天空，手办中的建筑仍可接受已有天空光的照明。
+	CaptureComponent->ShowFlags.SetAtmosphere(!bHideAtmosphere);
+	CaptureComponent->ShowFlags.SetCloud(!bHideClouds);
+	CaptureComponent->ShowFlags.SetFog(!bHideFog);
+	CaptureComponent->ShowFlags.SetVolumetricFog(!bHideFog);
+
 	// 重新生成黑名单，允许关卡运行时动态修改 ActorsToHideFromCapture。
 	// PRM_RenderScenePrimitives 表示“普通场景全部捕获，明确列出的 Actor 排除”。
 	CaptureComponent->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
 	CaptureComponent->HiddenActors.Reset();
+	CaptureComponent->ClearHiddenComponents();
+	auto HideActor = [CaptureComponent](AActor* Actor)
+	{
+		if (!IsValid(Actor))
+			return;
+		CaptureComponent->HiddenActors.AddUnique(Actor);
+		// 天空蓝图可能通过 ChildActorComponent 包含实际的天空网格。
+		// 同时剔除这些子 Actor 的 Primitive，避免只隐藏蓝图外壳却漏掉天空球。
+		CaptureComponent->HideActorComponents(Actor, true);
+	};
 	if (bHideOwnerActor)
 		CaptureComponent->HiddenActors.AddUnique(GetOwner());
 	CaptureComponent->HiddenActors.AddUnique(CaptureActor);
 
 	for (AActor* Actor : ActorsToHideFromCapture)
-		if (IsValid(Actor))
-			CaptureComponent->HiddenActors.AddUnique(Actor);
+		HideActor(Actor);
 }
 
 void UDreamSceneCapturePresentationComponent::UpdateCaptureView()

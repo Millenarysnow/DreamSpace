@@ -137,6 +137,22 @@ public:
 	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|捕获过滤")
 	TArray<TObjectPtr<AActor>> ActorsToHideFromCapture;
 
+	/**
+	 * 仅在手办捕获中关闭大气天空；主视口仍正常显示天空。
+	 * SkyAtmosphere 不是普通网格，不能只靠 HiddenActors 剔除。
+	 * 使用网格制作的天空球/天空盒仍须加入 ActorsToHideFromCapture。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获过滤")
+	bool bHideAtmosphere = true;
+
+	/** 仅在手办捕获中关闭体积云，避免云层填满本应透明的背景。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获过滤")
+	bool bHideClouds = true;
+
+	/** 仅在手办捕获中关闭高度雾/体积雾，保留模型周围的透明背景。 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获过滤")
+	bool bHideFog = true;
+
 	/** 是否把组件所属 Actor 整体加入黑名单；默认关闭，以便缩略图可以看到玩家自己。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获过滤")
 	bool bHideOwnerActor = false;
