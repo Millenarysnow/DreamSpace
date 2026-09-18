@@ -169,6 +169,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
 	FVector DisplayUpDirection = FVector::UpVector;
 
+	/**
+	 * 是否将显示图像绕面片法线旋转 180 度。
+	 *
+	 * UE 基础 Plane 的局部 UV 方向与 SceneCapture RenderTarget 的画面坐标
+	 * 约定相差一个 180 度旋转，因此默认开启以使手办中的上下、左右与外部
+	 * 观察相机保持一致。这个开关只修正显示面上的图像方向，不会改变
+	 * SceneCapture 的世界位置、旋转或手办视差计算。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
+	bool bRotateDisplayImage180Degrees = true;
+
 	/** 立即重建黑名单、更新相机姿态并请求一次捕获；调试或运行时改变配置时可调用。 */
 	UFUNCTION(BlueprintCallable, Category = "场景缩略图")
 	void RefreshCaptureNow();

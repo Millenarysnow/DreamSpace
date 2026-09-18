@@ -384,6 +384,13 @@ void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
 	FVector Right = Up.Cross(ToCamera).GetSafeNormal();
 	if (Right.IsNearlyZero())
 		return;
+	if (bRotateDisplayImage180Degrees)
+	{
+		// 基础 Plane 的 UV 方向与 SceneCapture 输出的画面坐标相差 180 度。
+		// 同时反转面片的两个平面轴，就能修正“上下、左右同时颠倒”的现象；
+		// 法线轴 ToCamera 保持不变，所以面片仍然朝向观察相机。
+		Right = -Right;
+	}
 	const FQuat FacingRotation = FRotationMatrix::MakeFromXZ(Right, ToCamera).ToQuat();
 	// 保留 CreatePresentationResources 根据 Mesh Bounds 和 DisplayWorldSize 算出的真实尺寸。
 	const FVector WorldScale = DisplayMesh->GetComponentScale();
