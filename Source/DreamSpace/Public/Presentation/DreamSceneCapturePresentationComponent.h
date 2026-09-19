@@ -5,6 +5,7 @@
 #include "DreamSceneCapturePresentationComponent.generated.h"
 
 class ASceneCapture2D;
+class ADreamSceneCaptureAnchor;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UStaticMesh;
@@ -100,16 +101,16 @@ public:
 	TObjectPtr<AActor> CapturedSceneReferenceActor;
 
 	/**
-	 * 可选的相机轨道锚点。
+	 * 游戏开始时自动绑定的相机轨道锚点，只读显示绑定结果。
 	 *
-	 * 这个 Actor 应放在“被捕获的真实场景”里，位置就是手办内部希望稳定的
-	 * 取景中心。设置后会自动使用它作为捕获参考原点；外部第三人称相机相对
-	 * 手办的位移会换算成围绕该 Actor 的内层相机位移，因此玩家移动不会把
-	 * 手办画面的中心一起拖走。运行时会自动隐藏该 Actor，并把它加入捕获黑名单。
-	 * 可以直接使用关卡中的 Empty Actor，不需要新增玩法逻辑。
+	 * 在“被捕获的真实场景”中放置一个 DreamSceneCaptureAnchor；组件会在
+	 * BeginPlay 中查找当前世界里第一个带默认 Tag 的该类实例，无需给运行时
+	 * 生成的角色手动配置关卡引用。查找发生在首次捕获之前，不会每帧遍历世界。
+	 * 锚点位置就是手办内部的取景中心，也作为捕获参考原点；默认让捕获相机
+	 * 始终朝向它。没有找到时沿用 CapturedSceneReferenceActor/Transform。
 	 */
-	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|相机锚点")
-	TObjectPtr<AActor> CameraOrbitAnchorActor;
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "场景缩略图|相机锚点")
+	TObjectPtr<ADreamSceneCaptureAnchor> CameraOrbitAnchorActor;
 
 	/** 是否让启用锚点后的内层相机始终朝向锚点位置，保持手办中心稳定。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|相机锚点")

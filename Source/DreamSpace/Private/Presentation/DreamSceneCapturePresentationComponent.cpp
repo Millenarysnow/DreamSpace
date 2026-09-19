@@ -1,5 +1,7 @@
 #include "DreamSceneCapturePresentationComponent.h"
 
+#include "DreamSceneCaptureAnchor.h"
+#include "EngineUtils.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -37,11 +39,28 @@ void UDreamSceneCapturePresentationComponent::BeginPlay()
 		return;
 	}
 
-	// 相机锚点是纯表现层的辅助 Actor。它可以保留在关卡中作为可视化定位点，
-	// 进入游戏后隐藏，避免定位用的图标或临时网格出现在玩家视口里。
-	if (IsValid(CameraOrbitAnchorActor))
-		CameraOrbitAnchorActor->SetActorHiddenInGame(true);
+	// 玩家通常由 GameMode 在运行时生成，不能依赖编辑器给角色填写关卡引用。
+	// 仅在当前世界查找专用锚点类及其固定 Tag，避免 PIE 时绑定到编辑器世界，
+	// 也避免把碰巧同名/同 Tag 的普通 Actor 当作锚点。关卡约定只放一个，找到
+	// 第一个匹配实例便结束；角色重新生成时，新组件也会在这里重新完成绑定。
+	CameraOrbitAnchorActor = nullptr;
+	for (TActorIterator<ADreamSceneCaptureAnchor> It(GetWorld()); It; ++It)
+	{
+		if (It->ActorHasTag(ADreamSceneCaptureAnchor::AnchorTag))
+		{
+			CameraOrbitAnchorActor = *It;
+			CameraOrbitAnchorActor->SetActorHiddenInGame(true);
+			break;
+		}
+	}
+	if (!IsValid(CameraOrbitAnchorActor))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("场景缩略图未找到带 %s Tag 的 DreamSceneCaptureAnchor，将沿用原有参考坐标：%s"),
+			*ADreamSceneCaptureAnchor::AnchorTag.ToString(), *GetNameSafe(GetOwner()));
+	}
 
+	// 先完成锚点绑定，再创建/启用捕获资源，避免第一帧使用错误的场景中心。
 	CreatePresentationResources();
 	SetPresentationActive(bEnabledAtBeginPlay);
 
@@ -288,9 +307,7 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
 	HideActor(CaptureActor);
 	if (IsValid(CameraOrbitAnchorActor))
 	{
-		// 运行时允许蓝图或关卡脚本重新指定锚点，所以这里每次刷新时都再次确保
-		// 它对主视口和 SceneCapture 都不可见。
-		CameraOrbitAnchorActor->SetActorHiddenInGame(true);
+		// 专用锚点本身已默认隐藏；仍纳入捕获黑名单，兼容派生蓝图增加辅助网格。
 		HideActor(CameraOrbitAnchorActor);
 	}
 
