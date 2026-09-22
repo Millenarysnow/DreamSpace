@@ -14,15 +14,5 @@ public class DreamSpace : ModuleRules
    PublicIncludePaths.Add(Path.Combine(ModuleDirectory,"Public",Area));
   // 模块根目录也加入包含路径，使任意子目录都能直接包含 DreamSpace.h（模块日志分类等）。
   PublicIncludePaths.Add(ModuleDirectory);
-  // 模块根目录也加入包含路径，使任意子目录都能直接包含 DreamSpace.h（模块日志分类等）。
-  PublicIncludePaths.Add(ModuleDirectory);
-  // 模块根目录也加入包含路径，使任意子目录都能直接包含 DreamSpace.h（模块日志分类等）。
-  PublicIncludePaths.Add(ModuleDirectory);
-  // 模块根目录也加入包含路径，使任意子目录都能直接包含 DreamSpace.h（模块日志分类等）。
-  PublicIncludePaths.Add(ModuleDirectory);
-  // 模块根目录也加入包含路径，使任意子目录都能直接包含 DreamSpace.h（模块日志分类等）。
-  PublicIncludePaths.Add(ModuleDirectory);
-  // 模块根目录也加入包含路径，使任意子目录都能直接包含 DreamSpace.h（模块日志分类等）。
-  PublicIncludePaths.Add(ModuleDirectory);
  }
 }
