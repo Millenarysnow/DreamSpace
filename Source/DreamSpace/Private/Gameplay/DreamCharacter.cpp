@@ -1,5 +1,4 @@
 #include "DreamCharacter.h"
-#include "DreamOccupantComponent.h"
 #include "DreamSceneCapturePresentationComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -16,9 +15,6 @@ ADreamCharacter::ADreamCharacter()
 	GetCharacterMovement()->bOrientRotationToMovement = false;
 	GetCharacterMovement()->MaxWalkSpeed = 420;
 	GetCharacterMovement()->JumpZVelocity = 450;
-	Occupant = CreateDefaultSubobject<UDreamOccupantComponent>(TEXT("Occupant"));
-	// 第一版单机玩家使用固定身份，跨地图重载后仍可从存档恢复同一持有者。
-	Occupant->OccupantId = FGuid(0xD5A, 0, 0, 1);
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(GetCapsuleComponent());
 	CameraBoom->TargetArmLength = 420;

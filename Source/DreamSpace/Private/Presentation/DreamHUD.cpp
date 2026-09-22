@@ -1,44 +1,18 @@
 #include "DreamHUD.h"
-#include "DreamPlayerController.h"
-#include "DreamInteractionPlayerSubsystem.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 void ADreamHUD::DrawHUD()
 {
 	Super::DrawHUD();
-	auto* Controller = Cast<ADreamPlayerController>(GetOwningPlayerController());
-	if (!Controller || !Canvas)
+	if (!Canvas)
 		return;
-	auto* Player = Controller->GetInteractionPlayer();
-	// 编辑器嵌入式 PIE 视口通常较矮，改用紧凑提示以保留可操作的场景区域。
-	const bool Compact = Canvas->ClipY < 500 || Canvas->ClipX < 900;
-	DrawRect(FLinearColor(0.01, 0.02, 0.04, 0.85), 12, 12, FMath::Min(900.0f, Canvas->ClipX - 24), Compact ? 98 : 165);
-	const bool Overview = Player && Player->GetInteractionMode() == EDreamInteractionMode::Overview;
-	DrawText(Overview ? TEXT("DreamSpace | 全局建筑操作") : TEXT("DreamSpace | 第三人称探索"),
-		FLinearColor(0.3, 0.8, 1), 24, 20, GEngine->GetMediumFont(), 1);
-	DrawText(Controller->DescribeSelection(), FLinearColor::White, 24, 48, GEngine->GetSmallFont(), 1);
-	if (Compact)
-	{
-		DrawText(TEXT("Tab 视角 | 左键选择 | R 旋转 | +/- 缩放 | Enter 提交 | Esc 取消 | U 撤销"), FLinearColor::White,
-			24, 68, GEngine->GetSmallFont(), 1);
-		DrawText(Controller->GetStatusText().ToString(), FLinearColor(1, 0.8, 0.3), 24, 88, GEngine->GetSmallFont(), 1);
-	}
-	else
-	{
-		DrawText(TEXT("Tab 视角 | WASD 移动 | 右键拖动全局镜头 | 滚轮缩放镜头 | 左键选择 | P 父级 / O 子级"),
-			FLinearColor::White, 24, 73, GEngine->GetSmallFont(), 1);
-		DrawText(TEXT("R/Shift+R 旋转 | X/Y/Z 轴 | +/- 尺寸 | 方向键平移 | Enter 提交 | Esc 取消 | U 撤销 / J 重做"),
-			FLinearColor::White, 24, 96, GEngine->GetSmallFont(), 1);
-		DrawText(TEXT("E 拾取/开门 | G 放下 | B 破坏/拆分 | F5 存档 / F9 读档"), FLinearColor::White, 24, 119,
-			GEngine->GetSmallFont(), 1);
-		DrawText(
-			Controller->GetStatusText().ToString(), FLinearColor(1, 0.8, 0.3), 24, 145, GEngine->GetSmallFont(), 1);
-	}
-	if (!Overview)
-	{
-		DrawLine(
-			Canvas->ClipX / 2 - 5, Canvas->ClipY / 2, Canvas->ClipX / 2 + 5, Canvas->ClipY / 2, FLinearColor::White);
-		DrawLine(
-			Canvas->ClipX / 2, Canvas->ClipY / 2 - 5, Canvas->ClipX / 2, Canvas->ClipY / 2 + 5, FLinearColor::White);
-	}
+	// 顶部提示条：只显示基础操作说明；旧的交互框架状态展示已随框架一并移除。
+	DrawRect(FLinearColor(0.01f, 0.02f, 0.04f, 0.85f), 12, 12, FMath::Min(860.0f, Canvas->ClipX - 24), 30);
+	DrawText(TEXT("DreamSpace | WASD 移动 | 鼠标 视角 | 空格 跳跃 | E 交互 | 调试命令 dream.DebugPivots 1"),
+		FLinearColor::White, 24, 20, GEngine->GetSmallFont(), 1);
+	// 屏幕中心准星：辅助玩家瞄准可交互物体，交互射线与准星方向一致。
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float CenterY = Canvas->ClipY * 0.5f;
+	DrawLine(CenterX - 5, CenterY, CenterX + 5, CenterY, FLinearColor::White);
+	DrawLine(CenterX, CenterY - 5, CenterX, CenterY + 5, FLinearColor::White);
 }
