@@ -18,7 +18,10 @@ void UDreamRotatableComponent::BeginPlay()
 	// 提前解析枢轴点并缓存，避免每次触发都做查找；
 	// 找不到时提前报警，让配置错误在开局就暴露，而不是等到玩家交互时才静默失败。
 	CachedPivot = ResolvePivot();
-	if (!CachedPivot)
+	UE_LOG(LogDreamSpace, Verbose,
+		TEXT("可转动组件初始化：Actor=%s Pivot=%s Duration=%.3f"),
+		*GetNameSafe(GetOwner()), *GetNameSafe(CachedPivot.Get()), RotationDuration);
+	if (!CachedPivot && GetOwner())
 	{
 		UE_LOG(LogDreamSpace, Warning,
 			TEXT("可转动组件：Actor [%s] 上找不到枢轴点组件（配置名称：%s），该组件将不会响应交互。"),
@@ -72,10 +75,13 @@ void UDreamRotatableComponent::OnInteracted_Implementation(AActor* Interactor)
 
 void UDreamRotatableComponent::TriggerRotation()
 {
+	UE_LOG(LogDreamSpace, Verbose, TEXT("可转动组件触发：Actor=%s CachedPivot=%s"),
+		*GetNameSafe(GetOwner()), *GetNameSafe(CachedPivot.Get()));
 	if (bRotating)
 	{
+		const AActor* Owner = GetOwner();
 		UE_LOG(LogDreamSpace, Warning, TEXT("可转动组件：Actor [%s] 正在转动中，本次触发被忽略。"),
-			*GetOwner()->GetName());
+			*GetNameSafe(Owner));
 		return;
 	}
 
@@ -83,7 +89,12 @@ void UDreamRotatableComponent::TriggerRotation()
 	if (!CachedPivot)
 		CachedPivot = ResolvePivot();
 	if (!CachedPivot)
+	{
+		UE_LOG(LogDreamSpace, Warning,
+			TEXT("可转动组件：Actor [%s] 触发失败，没有解析到有效枢轴点组件。"),
+			*GetNameSafe(GetOwner()));
 		return;
+	}
 
 	AActor* Owner = GetOwner();
 	if (!Owner)
@@ -114,11 +125,18 @@ UDreamPivotPointComponent* UDreamRotatableComponent::ResolvePivot() const
 	if (!Owner)
 		return nullptr;
 
+	// FComponentReference 是编辑器可选的真实组件引用，优先于旧的名称字段。
+	if (UActorComponent* ReferencedComponent = PivotComponent.GetComponent(const_cast<AActor*>(Owner)))
+		if (UDreamPivotPointComponent* ReferencedPivot = Cast<UDreamPivotPointComponent>(ReferencedComponent))
+			return ReferencedPivot;
+
 	// 先收集 Actor 上全部枢轴点组件。
 	TArray<UDreamPivotPointComponent*> Pivots;
 	Owner->GetComponents<UDreamPivotPointComponent>(Pivots);
+	UE_LOG(LogDreamSpace, Verbose, TEXT("可转动组件解析枢轴：Actor=%s Count=%d"),
+		*Owner->GetName(), Pivots.Num());
 	if (Pivots.IsEmpty())
-		return nullptr;
+		return Owner->FindComponentByClass<UDreamPivotPointComponent>();
 
 	// 配置了名称时按名称精确匹配；未配置时使用第一个枢轴点。
 	if (!PivotComponentName.IsNone())

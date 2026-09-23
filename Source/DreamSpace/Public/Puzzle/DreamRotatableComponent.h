@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Components/ActorComponent.h"
+#include "Engine/EngineTypes.h"
 #include "DreamInteractableInterface.h"
 #include "DreamRotatableComponent.generated.h"
 
@@ -60,10 +61,20 @@ private:
 	// ---------- 配置项 ----------
 
 	/**
-	 * 枢轴点组件的名称；留空时自动使用所属 Actor 上的第一个枢轴点组件。
-	 * 同一个 Actor 挂多个枢轴点时，用这个名称区分当前组件使用哪一个。
+	 * 要使用的枢轴点组件。编辑器会提供组件选择器，默认只列出同一 Actor
+	 * 上的 UDreamPivotPointComponent；留空时自动选择第一个枢轴点。
 	 */
-	UPROPERTY(EditAnywhere, Category = "可转动|枢轴")
+	UPROPERTY(EditAnywhere, Category = "可转动|枢轴",
+		meta = (UseComponentPicker = true,
+			AllowedClasses = "/Script/DreamSpace.DreamPivotPointComponent",
+			DisplayName = "枢轴点组件"))
+	FComponentReference PivotComponent;
+
+	/**
+	 * 旧版本按名称选择枢轴点的兼容字段。新配置应使用上面的组件选择器；
+	 * 当组件引用为空时仍会读取这个名称，避免已有蓝图失效。
+	 */
+	UPROPERTY(EditAnywhere, Category = "可转动|枢轴", meta = (AdvancedDisplay))
 	FName PivotComponentName;
 
 	/** 绕枢轴点局部坐标系的哪根轴转动。 */
@@ -79,7 +90,7 @@ private:
 	float RotationDuration = 0.5f;
 
 	/** 调试绘制时转轴箭头的长度（厘米）。 */
-	UPROPERTY(EditAnywhere, Category = "调试")
+	UPROPERTY(EditAnywhere, Category = "调试", meta = (ClampMin = "0.0", UIMin = "0.0"))
 	float DebugAxisDrawLength = 150.0f;
 
 	// ---------- 内部状态 ----------
@@ -105,7 +116,7 @@ private:
 
 	// ---------- 内部函数 ----------
 
-	/** 按配置解析枢轴点组件：优先按名称匹配，否则取 Actor 上第一个枢轴点组件。 */
+	/** 按配置解析枢轴点组件：组件引用 > 旧名称 > Actor 上第一个枢轴点。 */
 	UDreamPivotPointComponent* ResolvePivot() const;
 
 	/** 取枢轴点局部坐标系中配置轴的世界方向（单位向量）。 */

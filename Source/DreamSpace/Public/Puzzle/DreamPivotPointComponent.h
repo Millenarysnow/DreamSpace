@@ -17,7 +17,11 @@
  * 调试：控制台输入 dream.DebugPivots 1 后，所有枢轴点会在世界中被绘制出来
  * （球标记 + RGB 三色局部轴），输入 dream.DebugPivots 0 关闭。
  */
-UCLASS(ClassGroup = (DreamPuzzle), meta = (BlueprintSpawnableComponent))
+UCLASS(
+	Blueprintable,
+	BlueprintType,
+	ClassGroup = (DreamPuzzle),
+	meta = (BlueprintSpawnableComponent, DisplayName = "Dream Pivot Point"))
 class DREAMSPACE_API UDreamPivotPointComponent : public USceneComponent
 {
 	GENERATED_BODY()
@@ -29,11 +33,11 @@ public:
 		float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	/** 调试绘制时枢轴点球标记的半径（厘米）。 */
-	UPROPERTY(EditAnywhere, Category = "调试")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "调试", meta = (ClampMin = "0.0", UIMin = "0.0"))
 	float DebugMarkerRadius = 8.0f;
 
 	/** 调试绘制时局部坐标轴箭头的长度（厘米）。 */
-	UPROPERTY(EditAnywhere, Category = "调试")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "调试", meta = (ClampMin = "0.0", UIMin = "0.0"))
 	float DebugAxisLength = 100.0f;
 
 	/**

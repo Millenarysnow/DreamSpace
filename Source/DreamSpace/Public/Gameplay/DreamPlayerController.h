@@ -3,6 +3,7 @@
 #include "DreamPlayerController.generated.h"
 class UInputMappingContext;
 class UInputAction;
+class UActorComponent;
 struct FInputActionValue;
 
 /**
@@ -16,6 +17,8 @@ class DREAMSPACE_API ADreamPlayerController : public APlayerController
 	GENERATED_BODY()
 public:
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
+	virtual void BeginPlay() override;
+	virtual void ReceivedPlayer() override;
 	virtual void SetupInputComponent() override;
 	virtual void UpdateRotation(float DeltaTime) override;
 
@@ -28,8 +31,11 @@ private:
 	TArray<TObjectPtr<UInputAction>> Actions;
 
 	/** 按键交互的检测距离（厘米），从相机中心向前做射线检测。 */
-	UPROPERTY(EditAnywhere, Category = "交互")
+	UPROPERTY(EditAnywhere, Category = "交互", meta = (ClampMin = "1.0", UIMin = "1.0"))
 	float InteractTraceDistance = 600.0f;
+	/** 交互射线使用的碰撞通道；默认 Visibility，关卡网格需要阻挡该通道。 */
+	UPROPERTY(EditAnywhere, Category = "交互")
+	TEnumAsByte<ECollisionChannel> InteractTraceChannel = ECC_Visibility;
 
 	void Move(const FInputActionValue& Value);
 	void Look(const FInputActionValue& Value);
@@ -37,4 +43,10 @@ private:
 	void EndJump();
 	/** E 键触发：对视线命中的 Actor 调用其身上所有可交互组件。 */
 	void Interact();
+	/** 在本地玩家已绑定后安装运行时创建的 Enhanced Input 映射。 */
+	void ApplyInputMapping();
+	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
+	void DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent);
+
+	bool bMappingApplied = false;
 };

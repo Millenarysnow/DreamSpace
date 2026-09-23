@@ -74,7 +74,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float AutoFramePadding = 1.25f;
 
-	/** 捕获相机到目标中心的距离；未跟随玩家相机时作为固定取景距离。 */
+	/** 捕获相机到目标中心的距离；跟随玩家时作为固定轨道半径，自动取景时作为备用距离。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float CaptureDistance = 2400.0f;
 
@@ -82,7 +82,8 @@ public:
 	 * 真实场景映射到手办空间时使用的统一缩放。
 	 *
 	 * 例如 0.1 表示真实场景中的 100 cm，在手办中占 10 cm。
-	 * 这个值会参与观察相机位置换算，不能只拿来缩放显示面，否则不会产生正确视差。
+	 * 旧版完整位置映射接口使用此比例；跟随玩家的固定轨道模式使用 CaptureDistance，
+	 * 不再根据观察相机与手办的瞬时距离缩放捕获半径。
 	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (ClampMin = "0.001", UIMin = "0.001"))
 	float MiniatureSceneScale = 0.25f;
@@ -116,7 +117,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|相机锚点")
 	bool bAimCaptureCameraAtOrbitAnchor = true;
 
-	/** 是否让 SceneCapture 跟随第三人称相机的完整位置、旋转和视场角。 */
+	/** 是否让 SceneCapture 跟随第三人称相机的轨道朝向和视场角（不跟随相机位置）。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	bool bFollowPlayerCamera = true;
 
@@ -149,7 +150,8 @@ public:
 	 *
 	 * SceneCapture 使用 PRM_RenderScenePrimitives 模式，因此会渲染普通场景，
 	 * 但不会渲染这里列出的 Actor。可以把山体、天空盒、远景装饰或其他不希望
-	 * 出现在手中模型里的 Actor 填到这里。当前测试场景可以保持为空。
+	 * 出现在手中模型里的 Actor 填到这里。游戏开始时，带有普通 Actor Tag
+	 * "HiddenFromCapture" 的对象也会自动追加到此数组。
 	 */
 	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|捕获过滤")
 	TArray<TObjectPtr<AActor>> ActorsToHideFromCapture;
@@ -231,6 +233,13 @@ public:
 		const FTransform& MiniatureFrameWorldTransform,
 		const FTransform& CapturedSceneReferenceWorldTransform,
 		float InMiniatureSceneScale);
+
+	/** 只映射观察相机的旋转；捕获位置始终处于场景参考点周围的固定半径上。 */
+	static FTransform MapObserverOrbitToCaptureWorld(
+		const FRotator& ObserverWorldRotation,
+		const FTransform& MiniatureFrameWorldTransform,
+		const FTransform& CapturedSceneReferenceWorldTransform,
+		float OrbitDistance);
 
 	/** 返回当前输出纹理，供后续门户材质或其他表现组件复用。 */
 	UFUNCTION(BlueprintPure, Category = "场景缩略图")

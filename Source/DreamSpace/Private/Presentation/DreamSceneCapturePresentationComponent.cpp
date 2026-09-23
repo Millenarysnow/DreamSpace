@@ -39,6 +39,18 @@ void UDreamSceneCapturePresentationComponent::BeginPlay()
 		return;
 	}
 
+	// 在游戏开始时扫描当前世界里已经存在的 Actor，把带指定普通 Actor Tag 的对象
+	// 自动并入捕获黑名单。使用 AddUnique 保留 Details 中已有的手动配置，同时避免
+	// 同一对象重复加入；这项扫描只在 BeginPlay 执行一次，不会在每帧遍历世界。
+	static const FName HiddenFromCaptureTag(TEXT("HiddenFromCapture"));
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (It->ActorHasTag(HiddenFromCaptureTag))
+		{
+			ActorsToHideFromCapture.AddUnique(*It);
+		}
+	}
+
 	// 玩家通常由 GameMode 在运行时生成，不能依赖编辑器给角色填写关卡引用。
 	// 仅在当前世界查找专用锚点类及其固定 Tag，避免 PIE 时绑定到编辑器世界，
 	// 也避免把碰巧同名/同 Tag 的普通 Actor 当作锚点。关卡约定只放一个，找到
@@ -234,6 +246,25 @@ FTransform UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWo
 	return CameraInMiniature * CapturedSceneReferenceWorldTransform;
 }
 
+FTransform UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+	const FRotator& ObserverWorldRotation,
+	const FTransform& MiniatureFrameWorldTransform,
+	const FTransform& CapturedSceneReferenceWorldTransform,
+	float OrbitDistance)
+{
+	FTransform MiniatureFrame = MiniatureFrameWorldTransform;
+	MiniatureFrame.SetScale3D(FVector::OneVector);
+	FTransform SceneReference = CapturedSceneReferenceWorldTransform;
+	SceneReference.SetScale3D(FVector::OneVector);
+
+	// 只取相机相对手办的朝向。实际 POV 位置可能被 SpringArm 碰撞挤近，
+	// 不应该改变 SceneCapture 到场景中心的距离。
+	const FQuat LocalRotation = MiniatureFrame.GetRotation().Inverse() * ObserverWorldRotation.Quaternion();
+	const float Radius = FMath::Max(OrbitDistance, 0.0f);
+	const FTransform OrbitInMiniature(LocalRotation, -LocalRotation.GetForwardVector() * Radius);
+	return OrbitInMiniature * SceneReference;
+}
+
 void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
 {
 	if (DisplayMesh)
@@ -323,13 +354,12 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 	FMinimalViewInfo PlayerPOV;
 	if (bFollowPlayerCamera && GetPlayerCameraPOV(PlayerPOV))
 	{
-		// 这里的 MiniatureFrame 是“手办局部坐标 -> 外部真实世界”的锚点，
-		// 而不是显示面本身。SceneCapture 最终仍接收一个真实世界 Transform。
-		const FTransform ObserverWorld(PlayerPOV.Rotation, PlayerPOV.Location);
+		// 只用相机朝向决定场景内的轨道方位；镜头碰撞、角色位移和推拉
+		// 都不会改变 SceneCapture 到场景参考点的固定距离。
 		const FTransform MiniatureFrame = GetComponentTransform();
 		const FTransform SceneReference = ResolveCapturedSceneReference();
-		const FTransform CaptureWorld = MapObserverCameraToCaptureWorld(
-			ObserverWorld, MiniatureFrame, SceneReference, MiniatureSceneScale);
+		const FTransform CaptureWorld = MapObserverOrbitToCaptureWorld(
+			PlayerPOV.Rotation, MiniatureFrame, SceneReference, CaptureDistance);
 		FTransform FinalCaptureWorld = CaptureWorld;
 		if (IsValid(CameraOrbitAnchorActor) && bAimCaptureCameraAtOrbitAnchor)
 		{
@@ -337,8 +367,7 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 				(CameraOrbitAnchorActor->GetActorLocation() - CaptureWorld.GetLocation()).GetSafeNormal();
 			if (!ToAnchor.IsNearlyZero())
 			{
-				// 位置仍由外部观察相机经过缩放映射得到，保证环绕半径和视差正确；
-				// 这里只把朝向约束到锚点，避免内层画面中心随着玩家移动漂移。
+				// 固定轨道上的相机仍看向锚点，避免内层画面中心漂移。
 				FRotator AnchorRotation = ToAnchor.Rotation();
 				// 保留外部相机的滚转，避免相机导演有 Roll 时画面突然归零。
 				AnchorRotation.Roll = CaptureWorld.Rotator().Roll;
@@ -349,7 +378,7 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 		CaptureActor->SetActorTransform(FinalCaptureWorld);
 		if (USceneCaptureComponent2D* CaptureComponent = CaptureActor->GetCaptureComponent2D())
 		{
-			// 均匀缩放不会改变透视 FOV；同步投影模式和 FOV 可以避免观察相机切换
+			// 固定轨道不会改变透视 FOV；同步投影模式和 FOV 可以避免观察相机切换
 			// 或第三人称镜头调整时，手办画面仍使用旧投影参数。
 			CaptureComponent->ProjectionType = PlayerPOV.ProjectionMode;
 			if (PlayerPOV.ProjectionMode == ECameraProjectionMode::Perspective)

@@ -4,6 +4,16 @@
 
 UDreamPivotPointComponent::UDreamPivotPointComponent()
 {
+	// 枢轴点是可直接摆放的编辑器 SceneComponent：允许在蓝图实例中修改
+	// 变换，并保持 Movable，避免关卡实例移动时被静态组件规则锁住。
+	bEditableWhenInherited = true;
+	SetMobility(EComponentMobility::Movable);
+#if WITH_EDITORONLY_DATA
+	// 没有 PrimitiveComponent 的纯 SceneComponent 默认没有可选的世界图标。
+	// 开启引擎自带可视化后，策划可以在视口中直接选中并拖动枢轴点。
+	bVisualizeComponent = true;
+#endif
+
 	// 调试绘制依赖 Tick；枢轴点本身没有任何每帧逻辑，开销可以忽略。
 	PrimaryComponentTick.bCanEverTick = true;
 }
