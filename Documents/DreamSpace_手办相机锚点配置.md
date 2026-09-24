@@ -11,7 +11,22 @@
 4. 启动游戏。角色的 `SceneMiniature` 组件会自动绑定它；可在该组件的“场景缩略图 | 相机锚点”下查看只读的 `CameraOrbitAnchorActor`。
 
 锚点只有一个承载变换的 SceneComponent，默认在游戏中隐藏、无碰撞、无 Tick，也没有可渲染模型。
-组件的 `bAimCaptureCameraAtOrbitAnchor` 默认开启，使捕获相机始终朝向锚点。
+组件的 `bAimCaptureCameraAtOrbitAnchor` 默认开启；它只影响不跟随玩家相机的固定取景模式。
+
+## 跟随玩家相机时的映射
+
+锚点对应手办面片的中心。默认的固定半径轨道模式（`bUseFixedCaptureOrbit` 开启）下：
+
+- 捕获相机沿“玩家相机 → 面片中心”的视线方向看向锚点，距离固定为 `CaptureDistance`。
+  从哪一侧、以多大俯角看手办，就从同一侧、同一俯角看建筑；
+- 视线先换算到手办坐标系（跟随手部/角色朝向），再换算到锚点坐标系，所以角色转身时手办里的建筑随之转动；
+- 画面上方向取玩家相机的上方向，与 `FaceCamera` 面片一致；视场角使用 `CaptureFOV`；
+- `bIgnoreSpringArmCollision` 开启时，使用 SpringArm 未经碰撞缩短的理想镜头位置，
+  镜头被墙推近时手办画面不会跟着推近。
+
+需要调整手办内的景别时改 `CaptureDistance` 或 `CaptureFOV`。
+关闭 `bUseFixedCaptureOrbit` 会退回等比映射：`(玩家相机 − 面片) / MiniatureSceneScale`，
+沿用玩家相机的旋转和 FOV，景别随玩家相机到面片的距离变化。
 
 ## 自动绑定时机
 

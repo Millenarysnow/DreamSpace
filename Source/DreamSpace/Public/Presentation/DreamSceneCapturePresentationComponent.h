@@ -74,7 +74,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float AutoFramePadding = 1.25f;
 
-	/** 捕获相机到目标中心的距离；跟随玩家时作为固定轨道半径，自动取景时作为备用距离。 */
+	/**
+	 * 捕获相机到场景中心的距离。
+	 *
+	 * 跟随玩家相机的固定轨道模式下，它是捕获相机到锚点的固定半径，决定手办内的景别；
+	 * 观察相机的推拉、SpringArm 被障碍推近都不会改变它。未跟随玩家相机时作为固定取景距离。
+	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float CaptureDistance = 2400.0f;
 
@@ -82,11 +87,38 @@ public:
 	 * 真实场景映射到手办空间时使用的统一缩放。
 	 *
 	 * 例如 0.1 表示真实场景中的 100 cm，在手办中占 10 cm。
-	 * 旧版完整位置映射接口使用此比例；跟随玩家的固定轨道模式使用 CaptureDistance，
-	 * 不再根据观察相机与手办的瞬时距离缩放捕获半径。
+	 * 只在等比映射路径（bUseFixedCaptureOrbit 关闭）中使用：观察相机相对面片的
+	 * 偏移除以此比例后还原到被捕获场景。该路径的取景距离随观察相机到面片的
+	 * 实际距离变化，镜头推近时手办画面也会一起推近。
 	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (ClampMin = "0.001", UIMin = "0.001"))
 	float MiniatureSceneScale = 0.25f;
+
+	/**
+	 * 是否使用固定半径轨道映射观察相机；默认开启。
+	 *
+	 * 开启时，捕获相机始终在锚点周围、距离为 CaptureDistance 的球面上并看向锚点：
+	 * - 观察方向取“观察相机 -> 面片”的完整三维方向，映射进手办坐标系。
+	 *   绕手办转动时从对应侧面看建筑；从高处向下看时看到对应的俯视角；
+	 * - 画面上方向取观察相机的上方向，与 FaceCamera 面片的上方向一致；
+	 * - 视场角使用 CaptureFOV，与观察相机的 FOV 无关；
+	 * - 观察相机的前后位移不会改变捕获距离。
+	 *
+	 * 关闭时退回等比映射：捕获相机 = 锚点 ⊕ (观察相机 − 面片) / MiniatureSceneScale，
+	 * 并沿用观察相机的旋转和 FOV。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
+	bool bUseFixedCaptureOrbit = true;
+
+	/**
+	 * 是否忽略 SpringArm 的碰撞修正，用“未被障碍推近的理想镜头位置”计算手办视角。
+	 *
+	 * 镜头被墙体推近时，真实相机位置会突然跳变；开启后手办视角只随鼠标绕转变化，
+	 * 不随碰撞推近抖动。面片自身仍然朝向真实相机，保证在主视口中正面可见。
+	 * 观察目标上找不到 SpringArm 时自动使用真实相机位置。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
+	bool bIgnoreSpringArmCollision = true;
 
 	/**
 	 * 捕获场景的参考坐标系到真实世界的变换。
@@ -107,17 +139,23 @@ public:
 	 * 在“被捕获的真实场景”中放置一个 DreamSceneCaptureAnchor；组件会在
 	 * BeginPlay 中查找当前世界里第一个带默认 Tag 的该类实例，无需给运行时
 	 * 生成的角色手动配置关卡引用。查找发生在首次捕获之前，不会每帧遍历世界。
-	 * 锚点位置就是手办内部的取景中心，也作为捕获参考原点；默认让捕获相机
-	 * 始终朝向它。没有找到时沿用 CapturedSceneReferenceActor/Transform。
+	 * 锚点位置就是手办内部的取景中心，对应面片中心；锚点旋转决定被捕获场景
+	 * 相对手办的朝向。跟随玩家相机的固定轨道模式下，捕获相机始终看向锚点。
+	 * 没有找到时沿用 CapturedSceneReferenceActor/Transform。
 	 */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "场景缩略图|相机锚点")
 	TObjectPtr<ADreamSceneCaptureAnchor> CameraOrbitAnchorActor;
 
-	/** 是否让启用锚点后的内层相机始终朝向锚点位置，保持手办中心稳定。 */
+	/**
+	 * 未跟随玩家相机时，是否让固定取景的捕获相机朝向锚点位置。
+	 *
+	 * 跟随玩家相机时不读取此选项：固定轨道模式本身就看向锚点，
+	 * 等比映射模式沿用观察相机的旋转。
+	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|相机锚点")
 	bool bAimCaptureCameraAtOrbitAnchor = true;
 
-	/** 是否让 SceneCapture 跟随第三人称相机的轨道朝向和视场角（不跟随相机位置）。 */
+	/** 是否让 SceneCapture 跟随第三人称相机观察手办的视角；映射方式见 bUseFixedCaptureOrbit。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	bool bFollowPlayerCamera = true;
 
@@ -224,8 +262,30 @@ public:
 	void SetPresentationEnabled(bool bEnabled);
 
 	/**
-	 * 将外部世界中的观察相机映射到 SceneCapture 所在的真实世界。
-	 * 该纯函数保留在公开接口中，便于自动化测试和后续相机导演复用同一套数学。
+	 * 固定半径轨道映射：捕获相机位于锚点周围的球面上，沿“观察相机 -> 面片”的方向看向锚点。
+	 *
+	 * 这是跟随玩家相机的默认数学：
+	 * - 观察方向：观察相机指向面片的世界方向，先变换到手办坐标系，再变换到捕获场景参考系。
+	 *   外部从哪一侧、以多大俯角看手办，捕获相机就从同一侧、同一俯角看建筑；
+	 * - 位置：锚点 − 观察方向 × OrbitRadius。距离固定，观察相机前后移动不改变景别；
+	 * - 上方向：观察相机的上方向投影到垂直于观察方向的平面，与 FaceCamera 面片的
+	 *   上方向计算方式一致，保证 RT 画面和面片的上下对齐。
+	 *
+	 * MiniatureFrameWorldTransform 的位置应为面片中心，旋转为手办坐标系朝向
+	 * （由 ResolveDisplayPlaneWorldTransform 提供），而不是组件原点。
+	 */
+	UFUNCTION(BlueprintPure, Category = "场景缩略图|坐标映射")
+	static FTransform MapObserverOrbitToCaptureWorld(
+		const FTransform& ObserverWorldTransform,
+		const FTransform& MiniatureFrameWorldTransform,
+		const FTransform& CapturedSceneReferenceWorldTransform,
+		float OrbitRadius);
+
+	/**
+	 * 等比映射：观察相机相对面片的完整偏移除以手办比例，还原到捕获场景，旋转沿用观察相机。
+	 *
+	 * 只在 bUseFixedCaptureOrbit 关闭时使用。取景距离随观察相机到面片的实际距离变化。
+	 * MiniatureFrameWorldTransform 的约定与 MapObserverOrbitToCaptureWorld 相同。
 	 */
 	UFUNCTION(BlueprintPure, Category = "场景缩略图|坐标映射")
 	static FTransform MapObserverCameraToCaptureWorld(
@@ -233,13 +293,6 @@ public:
 		const FTransform& MiniatureFrameWorldTransform,
 		const FTransform& CapturedSceneReferenceWorldTransform,
 		float InMiniatureSceneScale);
-
-	/** 只映射观察相机的旋转；捕获位置始终处于场景参考点周围的固定半径上。 */
-	static FTransform MapObserverOrbitToCaptureWorld(
-		const FRotator& ObserverWorldRotation,
-		const FTransform& MiniatureFrameWorldTransform,
-		const FTransform& CapturedSceneReferenceWorldTransform,
-		float OrbitDistance);
 
 	/** 返回当前输出纹理，供后续门户材质或其他表现组件复用。 */
 	UFUNCTION(BlueprintPure, Category = "场景缩略图")
@@ -277,4 +330,6 @@ private:
 	void CaptureOnce();
 	bool GetPlayerCameraPOV(FMinimalViewInfo& OutPOV) const;
 	FTransform ResolveCapturedSceneReference() const;
+	FTransform ResolveDisplayPlaneWorldTransform() const;
+	FVector ResolveObserverLocation(const FMinimalViewInfo& POV) const;
 };
