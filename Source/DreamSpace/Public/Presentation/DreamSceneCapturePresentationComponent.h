@@ -98,9 +98,9 @@ public:
 	 * 是否使用固定半径轨道映射观察相机；默认开启。
 	 *
 	 * 开启时，捕获相机始终在锚点周围、距离为 CaptureDistance 的球面上并看向锚点：
-	 * - 观察方向取“观察相机 -> 面片”的完整三维方向，映射进手办坐标系。
-	 *   绕手办转动时从对应侧面看建筑；从高处向下看时看到对应的俯视角；
-	 * - 画面上方向取观察相机的上方向，与 FaceCamera 面片的上方向一致；
+	 * - 观察方向默认取“观察相机 -> 面片中心”的视线，映射进手办坐标系：
+	 *   dir = normalize(面片位置 − 观察相机位置)，捕获相机放在锚点 − dir × 距离；
+	 * - 画面上方向取观察相机的上方向，面片法线与视线一致，与 FaceCamera 的面片对齐；
 	 * - 视场角使用 CaptureFOV，与观察相机的 FOV 无关；
 	 * - 观察相机的前后位移不会改变捕获距离。
 	 *
@@ -111,10 +111,26 @@ public:
 	bool bUseFixedCaptureOrbit = true;
 
 	/**
+	 * 固定轨道的观察方向是否取“观察相机 -> 面片中心”的视线；默认开启。
+	 *
+	 * 这是真实手办的取景方式：捕获相机放在锚点沿视线方向的反侧，
+	 * dir = normalize(面片世界位置 − 观察相机世界位置)，位置 = 锚点 − dir × CaptureDistance。
+	 * 玩家绕着角色转，就从对应的一侧、对应的俯角看到建筑；面片也严格垂直于这条视线，
+	 * 不会出现透视压缩。观察位置取 SpringArm 未经碰撞缩短的理想位置，
+	 * 因此镜头被挤近不会改变这个方向。
+	 *
+	 * 关闭时改用观察相机的前方向：捕获相机的转动与鼠标绕转 1:1 对应，
+	 * 但面片与视线之间会差一个随面片偏移和臂长变化的夹角。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (EditCondition = "bUseFixedCaptureOrbit"))
+	bool bOrbitAlongLineOfSightToDisplay = true;
+
+	/**
 	 * 是否忽略 SpringArm 的碰撞修正，用“未被障碍推近的理想镜头位置”计算手办视角。
 	 *
-	 * 镜头被墙体推近时，真实相机位置会突然跳变；开启后手办视角只随鼠标绕转变化，
-	 * 不随碰撞推近抖动。面片自身仍然朝向真实相机，保证在主视口中正面可见。
+	 * 遵循的映射始终是“观察相机 -> 面片中心”的视线，因此该选项只改变观察位置
+	 * 的取值，不改变取景方向。
+	 * 面片朝向在固定轨道模式下与捕获视线一致，其他模式仍朝向真实相机。
 	 * 观察目标上找不到 SpringArm 时自动使用真实相机位置。
 	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
@@ -123,13 +139,15 @@ public:
 	/**
 	 * 捕获场景的参考坐标系到真实世界的变换。
 	 *
-	 * SceneCapture 最终仍然需要一个真实世界 Transform。计算过程先把外部相机
-	 * 变换到手办坐标，再通过这个参考系还原到实际场景世界坐标。默认值为世界原点。
+	 * SceneCapture 最终需要一个真实世界 Transform。这里只使用它的**位置**作为
+	 * 被捕获场景的原点；旋转不参与计算。手办组件与锚点的旋转都属于显示层或取景
+	 * 参考系，一旦乘进捕获方向，方位角会整体翻转，捕获相机就跑到玩家相机的另一侧。
+	 * 默认值为世界原点。
 	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	FTransform CapturedSceneReferenceTransform = FTransform::Identity;
 
-	/** 可选的参考 Actor；设置后优先使用它的世界变换作为捕获场景参考系。 */
+	/** 可选的参考 Actor；设置后使用它的世界位置作为捕获场景原点，同样不取旋转。 */
 	UPROPERTY(EditInstanceOnly, Category = "场景缩略图|坐标映射")
 	TObjectPtr<AActor> CapturedSceneReferenceActor;
 
@@ -139,9 +157,9 @@ public:
 	 * 在“被捕获的真实场景”中放置一个 DreamSceneCaptureAnchor；组件会在
 	 * BeginPlay 中查找当前世界里第一个带默认 Tag 的该类实例，无需给运行时
 	 * 生成的角色手动配置关卡引用。查找发生在首次捕获之前，不会每帧遍历世界。
-	 * 锚点位置就是手办内部的取景中心，对应面片中心；锚点旋转决定被捕获场景
-	 * 相对手办的朝向。跟随玩家相机的固定轨道模式下，捕获相机始终看向锚点。
-	 * 没有找到时沿用 CapturedSceneReferenceActor/Transform。
+	 * 锚点位置就是手办内部的取景中心，对应面片中心：捕获相机绕它取景。
+	 * 锚点旋转不参与映射，捕获相机始终在玩家相机所在的同一侧。
+	 * 没有找到时沿用 CapturedSceneReferenceActor/Transform 的位置。
 	 */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "场景缩略图|相机锚点")
 	TObjectPtr<ADreamSceneCaptureAnchor> CameraOrbitAnchorActor;
@@ -234,7 +252,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
 	FName DisplayTextureParameterName = TEXT("SceneCaptureTexture");
 
-	/** 面片是否跟随第三人称观察相机转向；它只改变显示面，不改变 SceneCapture 坐标映射。 */
+	/**
+	 * 面片是否跟随第三人称观察相机转向；它只改变显示面，不改变 SceneCapture 坐标映射。
+	 *
+	 * 跟随玩家相机的固定轨道模式下，FaceCamera 的面片法线与捕获视线取自同一方向
+	 * （默认是玩家相机前方向的反方向），保证画面与面片不会互相错开。
+	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
 	EDreamMiniatureFacingMode DisplayFacingMode = EDreamMiniatureFacingMode::FaceCamera;
 
@@ -262,11 +285,11 @@ public:
 	void SetPresentationEnabled(bool bEnabled);
 
 	/**
-	 * 固定半径轨道映射：捕获相机位于锚点周围的球面上，沿“观察相机 -> 面片”的方向看向锚点。
+	 * 固定半径轨道映射：捕获相机位于锚点周围的球面上，看向锚点。
 	 *
 	 * 这是跟随玩家相机的默认数学：
-	 * - 观察方向：观察相机指向面片的世界方向，先变换到手办坐标系，再变换到捕获场景参考系。
-	 *   外部从哪一侧、以多大俯角看手办，捕获相机就从同一侧、同一俯角看建筑；
+	 * - 观察方向：默认取观察相机的前方向；bAlongLineOfSightToFrame 为 true 时取
+	 *   “观察相机 -> 面片中心”的视线。方向先变换到手办坐标系，再变换到捕获场景参考系；
 	 * - 位置：锚点 − 观察方向 × OrbitRadius。距离固定，观察相机前后移动不改变景别；
 	 * - 上方向：观察相机的上方向投影到垂直于观察方向的平面，与 FaceCamera 面片的
 	 *   上方向计算方式一致，保证 RT 画面和面片的上下对齐。
@@ -279,7 +302,8 @@ public:
 		const FTransform& ObserverWorldTransform,
 		const FTransform& MiniatureFrameWorldTransform,
 		const FTransform& CapturedSceneReferenceWorldTransform,
-		float OrbitRadius);
+		float OrbitRadius,
+		bool bAlongLineOfSightToFrame = false);
 
 	/**
 	 * 等比映射：观察相机相对面片的完整偏移除以手办比例，还原到捕获场景，旋转沿用观察相机。
@@ -332,4 +356,6 @@ private:
 	FTransform ResolveCapturedSceneReference() const;
 	FTransform ResolveDisplayPlaneWorldTransform() const;
 	FVector ResolveObserverLocation(const FMinimalViewInfo& POV) const;
+	/** dream.DebugSceneCapture 1 时每帧绘制捕获相机、锚点与面片方向，只用于调试。 */
+	void DrawCaptureDebug() const;
 };

@@ -73,12 +73,54 @@ bool FDreamSceneCaptureSidePitchTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Capture up direction matches the observer up direction"),
 		(Capture.GetRotation().GetUpVector() | Observer.GetRotation().GetUpVector()) > 0.99f);
 
-	// 观察相机的朝向偏离面片（面片不在屏幕中心）时，视线仍由眼睛到面片的方向决定。
+	// 观察相机的朝向偏离面片（面片不在屏幕中心）时，默认的视线模式仍由
+	// “眼睛 -> 面片”的方向决定；显式关闭该模式才跟随相机前方向。
 	const FTransform OffAxisObserver(ObserverRotation + FRotator(0.0f, 20.0f, 0.0f), ObserverLocation);
 	const FTransform OffAxisCapture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
 		OffAxisObserver, MiniatureFrame, SceneReference, Radius);
-	TestTrue(TEXT("Capture keeps looking at the anchor when the plane is off screen center"),
+	TestTrue(TEXT("Default orbit keeps looking along the eye-to-plane direction"),
 		OffAxisCapture.GetLocation().Equals(Capture.GetLocation(), 0.01f));
+	const FTransform ForwardCapture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+		OffAxisObserver, MiniatureFrame, SceneReference, Radius, false);
+	TestTrue(TEXT("Observer-forward orbit follows the camera forward direction"),
+		ForwardCapture.GetRotation().GetForwardVector().Equals(
+			OffAxisObserver.GetRotation().GetForwardVector(), 0.001f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamSceneCapturePivotOffsetTest,
+	"DreamSpace.Presentation.SceneCapturePivotOffset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamSceneCapturePivotOffsetTest::RunTest(const FString& Parameters)
+{
+	// 第三人称相机绕角色枢轴转动，面片偏在角色右前方。默认的视线模式下，
+	// 捕获方向是“相机 -> 面片”的视线，因此与相机前方向相差一个由面片偏移和
+	// 臂长决定的夹角；面片正好落在枢轴上时两者才重合。
+	const FVector Pivot(0.0f, 0.0f, 60.0f);
+	const FTransform SceneReference = FTransform::Identity;
+	constexpr float ArmLength = 420.0f;
+	constexpr float Radius = 1000.0f;
+	const FTransform OffsetFrame(FRotator::ZeroRotator, FVector(75.0f, 55.0f, 95.0f));
+	const FRotator CameraRotation(-30.0f, -90.0f, 0.0f);
+	const FVector ObserverLocation = Pivot - CameraRotation.Vector() * ArmLength;
+
+	// 捕获方向 = normalize(面片位置 − 观察位置)，且捕获相机落在锚点的反侧。
+	const FTransform Capture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+		FTransform(CameraRotation, ObserverLocation), OffsetFrame, SceneReference, Radius);
+	const FVector ExpectedForward =
+		(OffsetFrame.GetLocation() - ObserverLocation).GetSafeNormal();
+	TestTrue(TEXT("Capture forward is the eye-to-plane direction"),
+		Capture.GetRotation().GetForwardVector().Equals(ExpectedForward, 0.001f));
+	TestTrue(TEXT("Capture sits on the far side of the anchor"),
+		Capture.GetLocation().Equals(SceneReference.GetLocation() - ExpectedForward * Radius, 0.01f));
+
+	// 面片偏在枢轴上时，视线与相机前方向重合，俯仰完全一致。
+	const FTransform PivotFrame(FRotator::ZeroRotator, ObserverLocation + CameraRotation.Vector() * ArmLength * 0.4f);
+	const FTransform PivotCapture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+		FTransform(CameraRotation, ObserverLocation), PivotFrame, SceneReference, Radius);
+	TestTrue(TEXT("A plane on the arm axis keeps the camera pitch"),
+		FMath::IsNearlyEqual(PivotCapture.Rotator().Pitch, CameraRotation.Pitch, 0.01f));
 	return true;
 }
 
@@ -88,19 +130,39 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamSceneCaptureFrameRotationTest,
 
 bool FDreamSceneCaptureFrameRotationTest::RunTest(const FString& Parameters)
 {
-	// 手办随手部转 180 度时，同一条世界视线在手办坐标中来自相反一侧。
+	// 回归测试：手办组件与锚点的旋转都属于显示层/参考系，不能影响捕获相机所在的一侧。
+	// 原型角色给面片组件设了 180° 朝向（DreamCharacter 的 SetRelativeRotation），
+	// 曾经让方位角整体翻转，捕获相机跑到玩家相机的另一侧。
 	const FTransform SceneReference = FTransform::Identity;
-	const FTransform Observer(FRotator::ZeroRotator, FVector(-500.0f, 0.0f, 0.0f));
+	const FTransform Observer(FRotator(0.0f, 45.0f, 0.0f), FVector(-500.0f, 0.0f, 0.0f));
+	const FVector FrameLocation(75.0f, 55.0f, 95.0f);
 	constexpr float Radius = 1000.0f;
 
-	const FTransform Capture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
-		Observer, FTransform(FRotator::ZeroRotator, FVector::ZeroVector), SceneReference, Radius);
-	const FTransform RotatedCapture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
-		Observer, FTransform(FRotator(0.0f, 180.0f, 0.0f), FVector::ZeroVector), SceneReference, Radius);
-	TestTrue(TEXT("Unrotated miniature is viewed from X-"),
-		Capture.GetLocation().Equals(FVector(-Radius, 0.0f, 0.0f), 0.01f));
-	TestTrue(TEXT("Miniature turned 180 degrees is viewed from X+"),
-		RotatedCapture.GetLocation().Equals(FVector(Radius, 0.0f, 0.0f), 0.01f));
+	const FTransform Baseline = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+		Observer, FTransform(FRotator::ZeroRotator, FrameLocation), SceneReference, Radius);
+	const FVector ViewDirection = (FrameLocation - Observer.GetLocation()).GetSafeNormal();
+
+	// 捕获相机始终在视线的反侧：玩家能看见手办的那一面，就是捕获相机所在的那一面。
+	TestTrue(TEXT("Capture sits on the far side of the anchor along the view direction"),
+		Baseline.GetLocation().Equals(SceneReference.GetLocation() - ViewDirection * Radius, 0.01f));
+
+	for (const FRotator& FrameRotation : {
+		FRotator(0.0f, 180.0f, 0.0f), FRotator(0.0f, -90.0f, 0.0f), FRotator(20.0f, 140.0f, 0.0f) })
+	{
+		const FTransform Capture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+			Observer, FTransform(FrameRotation, FrameLocation), SceneReference, Radius);
+		TestTrue(TEXT("Miniature rotation does not move the capture camera"),
+			Capture.GetLocation().Equals(Baseline.GetLocation(), 0.01f));
+	}
+	for (const FRotator& ReferenceRotation : { FRotator(0.0f, 90.0f, 0.0f), FRotator(0.0f, -35.0f, 0.0f) })
+	{
+		const FTransform RotatedReference(ReferenceRotation, SceneReference.GetLocation());
+		const FTransform Capture = UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
+			Observer, FTransform(FRotator(0.0f, 180.0f, 0.0f), FrameLocation), RotatedReference, Radius);
+		TestTrue(TEXT("Anchor rotation only moves the capture camera with the anchor"),
+			Capture.GetLocation().Equals(
+				RotatedReference.GetLocation() - ViewDirection * Radius, 0.01f));
+	}
 	return true;
 }
 
@@ -110,24 +172,29 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamSceneCaptureObserverTransformTest,
 
 bool FDreamSceneCaptureObserverTransformTest::RunTest(const FString& Parameters)
 {
-	// 等比映射路径：捕获相机保留观察相机相对面片的完整位姿。
-	const FTransform MiniatureFrame(FRotator::ZeroRotator, FVector(50.0f, 0.0f, 0.0f));
-	const FTransform Observer(FRotator(-30.0f, -90.0f, 0.0f), FVector(0.0f, 50.0f, 0.0f));
-	const FTransform SceneReference = FTransform::Identity;
+	// 等比映射路径：观察相机相对面片的偏移按比例还原到捕获场景，旋转沿用观察相机。
+	// 手办组件与锚点的旋转同样不参与，捕获场景始终与世界轴对齐。
+	const FVector FrameLocation(50.0f, 0.0f, 0.0f);
+	const FVector ObserverLocation(0.0f, 50.0f, 0.0f);
+	const FRotator ObserverRotation(-30.0f, -90.0f, 0.0f);
+	const FTransform SceneReference(FRotator(0.0f, 70.0f, 0.0f), FVector(120.0f, -60.0f, 30.0f));
+	const FTransform Observer(ObserverRotation, ObserverLocation);
+	const FTransform MiniatureFrame(FRotator(0.0f, 180.0f, 0.0f), FrameLocation);
 
 	const FTransform Capture = UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWorld(
 		Observer, MiniatureFrame, SceneReference, 1.0f);
-	const FTransform ExpectedRelative = Observer.GetRelativeTransform(MiniatureFrame);
-
-	TestTrue(TEXT("Capture camera keeps the observer-relative rotation"),
-		Capture.GetRotation().Equals(ExpectedRelative.GetRotation(), 0.001f));
-	TestTrue(TEXT("Capture camera keeps the observer-relative offset"),
-		Capture.GetLocation().Equals(ExpectedRelative.GetLocation(), 0.01f));
+	const FVector ExpectedOffset = ObserverLocation - FrameLocation;
+	TestTrue(TEXT("Capture keeps the observer rotation regardless of frame and anchor rotation"),
+		Capture.GetRotation().Equals(ObserverRotation.Quaternion(), 0.001f));
+	TestTrue(TEXT("Capture keeps the observer-relative offset from the anchor"),
+		Capture.GetLocation().Equals(SceneReference.GetLocation() + ExpectedOffset, 0.01f));
 
 	const FTransform HalfScaleCapture = UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWorld(
 		Observer, MiniatureFrame, SceneReference, 0.5f);
 	TestTrue(TEXT("Scale divides the observer offset"),
-		HalfScaleCapture.GetLocation().Equals(ExpectedRelative.GetLocation() * 2.0f, 0.01f));
+		HalfScaleCapture.GetLocation().Equals(SceneReference.GetLocation() + ExpectedOffset * 2.0f, 0.01f));
+	TestTrue(TEXT("Scale does not change the capture rotation"),
+		HalfScaleCapture.GetRotation().Equals(ObserverRotation.Quaternion(), 0.001f));
 	return true;
 }
 #endif
