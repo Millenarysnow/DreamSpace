@@ -7,7 +7,6 @@
 #include "EnhancedInputSubsystems.h"
 #include "InputMappingContext.h"
 #include "InputAction.h"
-#include "InputModifiers.h"
 #include "Components/ActorComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -15,12 +14,40 @@
 #include "Engine/HitResult.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
+#include "UObject/ConstructorHelpers.h"
 
 // 调试开关只影响点击时的可视化，不参与拾取或玩法。捕获组件已把调试线从 RT 中剔除。
 static bool bDreamMiniatureInteractionDebugDraw = false;
 static FAutoConsoleVariableRef CVarDreamMiniatureInteractionDebugDraw(
 	TEXT("dream.DebugMiniatureInteraction"), bDreamMiniatureInteractionDebugDraw,
 	TEXT("显示手办点击的玩家射线、捕获射线和命中点。0=关闭，1=开启。"), ECVF_Default);
+
+ADreamPlayerController::ADreamPlayerController()
+{
+	// 直接加载官方模板的两个映射上下文：IMC_Default 提供移动、跳跃和手柄视角，
+	// IMC_MouseLook 提供鼠标二维视角。映射资产不是蓝图，运行时由原生控制器管理。
+	static ConstructorHelpers::FObjectFinder<UInputMappingContext> DefaultContext(
+		TEXT("/Game/Input/IMC_Default.IMC_Default"));
+	if (DefaultContext.Succeeded())
+	{
+		DefaultMappingContexts.Add(DefaultContext.Object);
+	}
+	else
+	{
+		UE_LOG(LogDreamSpace, Error, TEXT("无法加载官方第三人称输入映射 IMC_Default。"));
+	}
+
+	static ConstructorHelpers::FObjectFinder<UInputMappingContext> MouseLookContext(
+		TEXT("/Game/Input/IMC_MouseLook.IMC_MouseLook"));
+	if (MouseLookContext.Succeeded())
+	{
+		DefaultMappingContexts.Add(MouseLookContext.Object);
+	}
+	else
+	{
+		UE_LOG(LogDreamSpace, Error, TEXT("无法加载官方第三人称鼠标输入映射 IMC_MouseLook。"));
+	}
+}
 
 void ADreamPlayerController::BeginPlay()
 {
@@ -40,11 +67,29 @@ void ADreamPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
 	if (bMiniatureInteractionMode && IsLocalController())
 		SetMiniatureInteractionMode(false);
-	// 退出时移除动态创建的输入映射，避免泄漏到下一次会话。
-	if (bMappingApplied && Mapping && GetLocalPlayer())
-		if (auto* Input = GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
-			Input->RemoveMappingContext(Mapping);
+
+	// 退出时移除项目交互和官方模板映射，避免 PIE 的下一次会话继承旧上下文。
+	if (GetLocalPlayer())
+	{
+		if (UEnhancedInputLocalPlayerSubsystem* Input =
+			GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+		{
+			if (bMappingApplied && Mapping)
+			{
+				Input->RemoveMappingContext(Mapping);
+			}
+			for (UInputMappingContext* Context : AppliedDefaultMappingContexts)
+			{
+				if (Context)
+				{
+					Input->RemoveMappingContext(Context);
+				}
+			}
+		}
+	}
 	bMappingApplied = false;
+	bDefaultMappingsApplied = false;
+	AppliedDefaultMappingContexts.Reset();
 	Super::EndPlay(Reason);
 }
 
@@ -59,79 +104,65 @@ void ADreamPlayerController::SetupInputComponent()
 			*GetNameSafe(InputComponent));
 		return;
 	}
-	if (Mapping)
+	if (!Mapping)
 	{
-		ApplyInputMapping();
-		return;
+		Mapping = NewObject<UInputMappingContext>(this, TEXT("DreamRuntimeInteractionMapping"));
+
+		// 辅助 lambda：创建一个瞬时按钮动作并只绑定项目交互，不重复绑定官方模板输入。
+		auto Button = [&](FKey Key, auto Method)
+		{
+			auto* Action = NewObject<UInputAction>(this,
+				MakeUniqueObjectName(this, UInputAction::StaticClass(),
+					FName(*FString::Printf(TEXT("DreamAction_%s"), *Key.ToString()))));
+			Action->ValueType = EInputActionValueType::Boolean;
+			Actions.Add(Action);
+			Mapping->MapKey(Action, Key);
+			Input->BindAction(Action, ETriggerEvent::Started, this, Method);
+		};
+		Button(EKeys::E, &ADreamPlayerController::Interact);
+		Button(EKeys::Tab, &ADreamPlayerController::ToggleMiniatureInteractionMode);
+		Button(EKeys::LeftMouseButton, &ADreamPlayerController::InteractWithMiniature);
+
+		// 滚轮缩放不属于官方模板输入，因此保留一个本地 Axis1D 动作。
+		auto* ZoomAction = NewObject<UInputAction>(this);
+		Actions.Add(ZoomAction);
+		ZoomAction->ValueType = EInputActionValueType::Axis1D;
+		Mapping->MapKey(ZoomAction, EKeys::MouseWheelAxis);
+		Input->BindAction(ZoomAction, ETriggerEvent::Triggered, this, &ADreamPlayerController::ZoomCamera);
 	}
 
-	Mapping = NewObject<UInputMappingContext>(this, TEXT("DreamRuntimeInputMapping"));
-	// 辅助 lambda：创建一个瞬时按钮动作并绑定到成员函数。
-	auto Button = [&](FKey Key, auto Method)
-	{
-		auto* Action = NewObject<UInputAction>(this, MakeUniqueObjectName(this, UInputAction::StaticClass(), FName(*FString::Printf(TEXT("DreamAction_%s"), *Key.ToString()))));
-		Action->ValueType = EInputActionValueType::Boolean;
-		Actions.Add(Action);
-		Mapping->MapKey(Action, Key);
-		Input->BindAction(Action, ETriggerEvent::Started, this, Method);
-	};
-	Button(EKeys::E, &ADreamPlayerController::Interact);
-	Button(EKeys::Tab, &ADreamPlayerController::ToggleMiniatureInteractionMode);
-	Button(EKeys::LeftMouseButton, &ADreamPlayerController::InteractWithMiniature);
-	// 空格跳跃需要同时监听按下与松开。
-	auto* Jump = NewObject<UInputAction>(this);
-	Actions.Add(Jump);
-	Mapping->MapKey(Jump, EKeys::SpaceBar);
-	Input->BindAction(Jump, ETriggerEvent::Started, this, &ADreamPlayerController::StartJump);
-	Input->BindAction(Jump, ETriggerEvent::Completed, this, &ADreamPlayerController::EndJump);
-	// WASD 移动：单动作 Axis2D，通过修饰器把四个方向键合成二维轴。
-	auto* MoveAction = NewObject<UInputAction>(this);
-	Actions.Add(MoveAction);
-	MoveAction->ValueType = EInputActionValueType::Axis2D;
-	auto MapAxis = [&](UInputAction* Action, FKey Key, bool bY, bool bNegative)
-	{
-		auto& Map = Mapping->MapKey(Action, Key);
-		if (bNegative)
-			Map.Modifiers.Add(NewObject<UInputModifierNegate>(Mapping));
-		if (bY)
-		{
-			auto* Swizzle = NewObject<UInputModifierSwizzleAxis>(Mapping);
-			Swizzle->Order = EInputAxisSwizzle::YXZ;
-			Map.Modifiers.Add(Swizzle);
-		}
-	};
-	MapAxis(MoveAction, EKeys::W, true, false);
-	MapAxis(MoveAction, EKeys::S, true, true);
-	MapAxis(MoveAction, EKeys::D, false, false);
-	MapAxis(MoveAction, EKeys::A, false, true);
-	Input->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ADreamPlayerController::Move);
-	// 鼠标视角：MouseY 取反以符合常见操作习惯。
-	auto* LookAction = NewObject<UInputAction>(this);
-	Actions.Add(LookAction);
-	LookAction->ValueType = EInputActionValueType::Axis2D;
-	MapAxis(LookAction, EKeys::MouseX, false, false);
-	MapAxis(LookAction, EKeys::MouseY, true, true);
-	Input->BindAction(LookAction, ETriggerEvent::Triggered, this, &ADreamPlayerController::Look);
-	// 鼠标滚轮：Axis1D，向上滚动为正、向下为负。
-	auto* ZoomAction = NewObject<UInputAction>(this);
-	Actions.Add(ZoomAction);
-	ZoomAction->ValueType = EInputActionValueType::Axis1D;
-	Mapping->MapKey(ZoomAction, EKeys::MouseWheelAxis);
-	Input->BindAction(ZoomAction, ETriggerEvent::Triggered, this, &ADreamPlayerController::ZoomCamera);
 	ApplyInputMapping();
 }
 
 void ADreamPlayerController::ApplyInputMapping()
 {
-	if (bMappingApplied || !Mapping || !GetLocalPlayer())
+	if (!IsLocalController() || !GetLocalPlayer())
 		return;
 
 	if (UEnhancedInputLocalPlayerSubsystem* Input =
 		GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
 	{
-		Input->AddMappingContext(Mapping, 0);
-		bMappingApplied = true;
-		UE_LOG(LogDreamSpace, Verbose, TEXT("已为玩家控制器安装运行时输入映射（E、Tab 和手办左键）。"));
+		if (!bDefaultMappingsApplied)
+		{
+			for (UInputMappingContext* Context : DefaultMappingContexts)
+			{
+				if (Context)
+				{
+					Input->AddMappingContext(Context, 0);
+					AppliedDefaultMappingContexts.Add(Context);
+				}
+			}
+			bDefaultMappingsApplied = true;
+			UE_LOG(LogDreamSpace, Verbose, TEXT("已安装官方第三人称输入映射上下文。"));
+		}
+
+		if (!bMappingApplied && Mapping)
+		{
+			Input->AddMappingContext(Mapping, 1);
+			bMappingApplied = true;
+			UE_LOG(LogDreamSpace, Verbose,
+				TEXT("已安装 DreamSpace 交互输入映射（E、Tab、手办左键和滚轮）。"));
+		}
 	}
 }
 
@@ -148,20 +179,6 @@ void ADreamPlayerController::UpdateRotation(float Delta)
 	Local.Pitch = FMath::Clamp(FRotator::NormalizeAxis(Local.Pitch + RotationInput.Pitch), -80.0, 80.0);
 	Local.Roll = 0;
 	SetControlRotation((ToWorld * Local.Quaternion()).Rotator());
-}
-void ADreamPlayerController::Move(const FInputActionValue& Value)
-{
-	if (auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn()))
-		ControlledCharacter->MoveOnGravityPlane(Value.Get<FVector2D>());
-}
-void ADreamPlayerController::Look(const FInputActionValue& Value)
-{
-	// 光标模式中鼠标移动负责选择手办上的位置，不能同时驱动第三人称相机。
-	if (bMiniatureInteractionMode)
-		return;
-	const auto Axis = Value.Get<FVector2D>();
-	AddYawInput(Axis.X);
-	AddPitchInput(Axis.Y);
 }
 void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
 {
@@ -182,16 +199,6 @@ void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
 		SpringArm->TargetArmLength - WheelDelta * CameraZoomStep,
 		MinCameraArmLength, MaxCameraArmLength);
 	SpringArm->TargetArmLength = NewLength;
-}
-void ADreamPlayerController::StartJump()
-{
-	if (auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn()))
-		ControlledCharacter->Jump();
-}
-void ADreamPlayerController::EndJump()
-{
-	if (auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn()))
-		ControlledCharacter->StopJumping();
 }
 void ADreamPlayerController::Interact()
 {

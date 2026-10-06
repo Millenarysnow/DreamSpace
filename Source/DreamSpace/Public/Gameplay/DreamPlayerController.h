@@ -16,6 +16,7 @@ class DREAMSPACE_API ADreamPlayerController : public APlayerController
 {
 	GENERATED_BODY()
 public:
+	ADreamPlayerController();
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 	virtual void BeginPlay() override;
 	virtual void ReceivedPlayer() override;
@@ -27,10 +28,24 @@ public:
 	bool GetMiniatureClickDebug(FVector2D& OutPosition, FString& OutMessage, FLinearColor& OutColor) const;
 
 private:
-	/** 运行时动态创建的输入映射上下文，不依赖任何内容侧资产配置。 */
+	/**
+	 * 官方第三人称模板的输入映射上下文。
+	 * 资源来自 Content/Input，由 C++ 构造函数加载，不需要通过控制器蓝图填写。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "输入|映射")
+	TArray<TObjectPtr<UInputMappingContext>> DefaultMappingContexts;
+
+	/** 已经加到本地玩家子系统的模板上下文，用于 EndPlay 时精确移除。 */
+	UPROPERTY()
+	TArray<TObjectPtr<UInputMappingContext>> AppliedDefaultMappingContexts;
+
+	/**
+	 * 项目额外交互使用的运行时映射：E、Tab、手办左键和滚轮缩放。
+	 * 官方模板负责移动/视角/跳跃，这个上下文只承载 DreamSpace 专属输入。
+	 */
 	UPROPERTY()
 	TObjectPtr<UInputMappingContext> Mapping;
-	/** 动态创建的输入动作集合，仅用于持有引用、防止被 GC 回收。 */
+	/** 动态创建的交互动作集合，仅用于持有引用、防止被 GC 回收。 */
 	UPROPERTY()
 	TArray<TObjectPtr<UInputAction>> Actions;
 
@@ -57,11 +72,7 @@ private:
 	float MaxCameraArmLength = 800.0f;
 
 private:
-	void Move(const FInputActionValue& Value);
-	void Look(const FInputActionValue& Value);
 	void ZoomCamera(const FInputActionValue& Value);
-	void StartJump();
-	void EndJump();
 	/** E 键触发：对视线命中的 Actor 调用其身上所有可交互组件。 */
 	void Interact();
 	/** Tab 切换光标模式：进入时暂停鼠标转视角，左键改为点击手办画面。 */
@@ -72,7 +83,7 @@ private:
 	/** 与鼠标输入解耦的完整拾取路径，自动化测试可直接提供一条已知的实际视线。 */
 	void InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection);
 	friend class FDreamMiniatureConfiguredProjectionTest;
-	/** 在本地玩家已绑定后安装运行时创建的 Enhanced Input 映射。 */
+	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
 	void DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent);
@@ -85,5 +96,6 @@ private:
 	double MiniatureDebugUntil = 0.0;
 
 	bool bMappingApplied = false;
+	bool bDefaultMappingsApplied = false;
 	bool bMiniatureInteractionMode = false;
 };

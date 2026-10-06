@@ -1,54 +1,239 @@
 #include "DreamCharacter.h"
-#include "DreamSceneCapturePresentationComponent.h"
-#include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/SpringArmComponent.h"
-#include "Components/CapsuleComponent.h"
-#include "Components/StaticMeshComponent.h"
+
 #include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "DreamPlayerController.h"
+#include "DreamSceneCapturePresentationComponent.h"
+#include "EnhancedInputComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Controller.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "InputAction.h"
+#include "InputActionValue.h"
 #include "UObject/ConstructorHelpers.h"
+
 ADreamCharacter::ADreamCharacter()
 {
-	GetCapsuleComponent()->InitCapsuleSize(34, 88);
-	bUseControllerRotationYaw = false;
+	// 胶囊尺寸与 UE5.8 官方第三人称模板一致，保证角色落地、台阶和导航行为一致。
+	GetCapsuleComponent()->InitCapsuleSize(42.0f, 96.0f);
+
+	// 控制器只负责改变相机朝向，角色本体由移动方向自动转向。
 	bUseControllerRotationPitch = false;
+	bUseControllerRotationYaw = false;
 	bUseControllerRotationRoll = false;
-	GetCharacterMovement()->bOrientRotationToMovement = false;
-	GetCharacterMovement()->MaxWalkSpeed = 420;
-	GetCharacterMovement()->JumpZVelocity = 450;
+
+	// 使用官方模板的移动参数。UE5.8 的 CharacterMovementComponent 已经支持
+	// 自定义重力方向，DoMove 会把输入投影到当前重力平面，移动组件会沿该平面转向。
+	UCharacterMovementComponent* Movement = GetCharacterMovement();
+	Movement->bOrientRotationToMovement = true;
+	Movement->RotationRate = FRotator(0.0f, 500.0f, 0.0f);
+	Movement->JumpZVelocity = 500.0f;
+	Movement->AirControl = 0.35f;
+	Movement->MaxWalkSpeed = 500.0f;
+	Movement->MinAnalogWalkSpeed = 20.0f;
+	Movement->BrakingDecelerationWalking = 2000.0f;
+	Movement->BrakingDecelerationFalling = 1500.0f;
+
+	// 角色网格直接在 C++ 中加载，去掉对 BP_ThirdPersonCharacter 的依赖。
+	// 资产路径与 UE5.8 官方第三人称 C++ 示例一致；当前工程已包含这些基础资产。
+	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
+	{
+		CharacterMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -89.0f));
+		CharacterMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
+
+		static ConstructorHelpers::FObjectFinder<USkeletalMesh> QuinnMesh(
+			TEXT("/Game/Characters/Mannequins/Meshes/SKM_Quinn_Simple.SKM_Quinn_Simple"));
+		if (QuinnMesh.Succeeded())
+		{
+			CharacterMesh->SetSkeletalMesh(QuinnMesh.Object);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("无法加载第三人称角色网格 SKM_Quinn_Simple，角色将使用空网格运行。"));
+		}
+
+		static ConstructorHelpers::FClassFinder<UAnimInstance> QuinnAnim(
+			TEXT("/Game/Characters/Mannequins/Anims/Unarmed/ABP_Unarmed"));
+		if (QuinnAnim.Succeeded())
+		{
+			CharacterMesh->SetAnimInstanceClass(QuinnAnim.Class);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("无法加载第三人称动画蓝图 ABP_Unarmed，角色将保持默认动画模式。"));
+		}
+	}
+
+	// 官方模板的相机轨道。保留项目原先的 420 cm 臂长和 60 cm 高度，
+	// 因为手办窗口的 ObserverArmLength 默认也以 420 cm 为对应观察距离。
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
-	CameraBoom->SetupAttachment(GetCapsuleComponent());
-	CameraBoom->TargetArmLength = 420;
+	CameraBoom->SetupAttachment(RootComponent);
+	CameraBoom->TargetArmLength = 420.0f;
 	CameraBoom->bUsePawnControlRotation = true;
-	CameraBoom->SetRelativeLocation(FVector(0, 0, 60));
+	CameraBoom->SetRelativeLocation(FVector(0.0f, 0.0f, 60.0f));
+
 	FollowCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("FollowCamera"));
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
+	FollowCamera->bUsePawnControlRotation = false;
 	FollowCamera->bConstrainAspectRatio = false;
-	// 原生原型角色没有手部骨骼，先把组件放在角色右前方作为手持位置占位。
-	// 后续换成带骨骼的角色时，只需把该组件重新 Attach 到手部 Socket。
+
+	// 手办显示面仍然挂在角色胶囊体右前方，位置、180 度显示朝向和相机映射
+	// 与原有实现保持一致。该组件的 SceneCapture 不参与角色移动输入。
 	SceneMiniature = CreateDefaultSubobject<UDreamSceneCapturePresentationComponent>(TEXT("SceneMiniature"));
 	SceneMiniature->SetupAttachment(GetCapsuleComponent());
 	SceneMiniature->SetRelativeLocation(FVector(75.0f, 55.0f, 35.0f));
 	SceneMiniature->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
-	// 开发角色使用引擎基础模型，不依赖项目中的角色蓝图或动画蓝图。
-	auto* Body = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Body"));
+	// 旧 BP_DreamCharacter 为手办画面使用非方形高分辨率 RenderTarget。
+	// 这里显式迁移这两个值，避免切换到原生角色后画质、RT 长宽比和材质采样结果变化。
+	SceneMiniature->RenderTargetWidth = 2200;
+	SceneMiniature->RenderTargetHeight = 2500;
+
+	// 兼容旧的 BP_DreamCharacter：保留 Body 这个原生子对象名称，但隐藏旧圆柱，
+	// 避免旧蓝图重新加载时丢失组件，同时确保新角色只显示 Quinn 骨骼网格。
+	Body = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Body"));
 	Body->SetupAttachment(GetCapsuleComponent());
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cylinder(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-	if (Cylinder.Succeeded())
-		Body->SetStaticMesh(Cylinder.Object);
-	Body->SetRelativeScale3D(FVector(0.5, 0.5, 1.4));
+	Body->SetVisibility(false);
+	Body->SetHiddenInGame(true);
 	Body->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> LegacyCylinder(
+		TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	if (LegacyCylinder.Succeeded())
+	{
+		Body->SetStaticMesh(LegacyCylinder.Object);
+	}
+
+	// 角色自身持有输入动作引用；PlayerController 只负责把映射上下文装到本地玩家。
+	static ConstructorHelpers::FObjectFinder<UInputAction> JumpInput(
+		TEXT("/Game/Input/Actions/IA_Jump.IA_Jump"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> MoveInput(
+		TEXT("/Game/Input/Actions/IA_Move.IA_Move"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> LookInput(
+		TEXT("/Game/Input/Actions/IA_Look.IA_Look"));
+	static ConstructorHelpers::FObjectFinder<UInputAction> MouseLookInput(
+		TEXT("/Game/Input/Actions/IA_MouseLook.IA_MouseLook"));
+	JumpAction = JumpInput.Object;
+	MoveAction = MoveInput.Object;
+	LookAction = LookInput.Object;
+	MouseLookAction = MouseLookInput.Object;
 }
+
+void ADreamCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
+{
+	Super::SetupPlayerInputComponent(PlayerInputComponent);
+
+	UEnhancedInputComponent* EnhancedInput = Cast<UEnhancedInputComponent>(PlayerInputComponent);
+	if (!EnhancedInput)
+	{
+		UE_LOG(LogTemp, Error,
+			TEXT("DreamCharacter 需要 UEnhancedInputComponent，无法安装官方第三人称输入。"));
+		return;
+	}
+
+	// 绑定前先检查动作资源，避免资源缺失时传入空指针导致难以定位的输入异常。
+	if (JumpAction)
+	{
+		EnhancedInput->BindAction(JumpAction, ETriggerEvent::Started, this, &ADreamCharacter::DoJumpStart);
+		EnhancedInput->BindAction(JumpAction, ETriggerEvent::Completed, this, &ADreamCharacter::DoJumpEnd);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("DreamCharacter 缺少 IA_Jump 输入动作。"));
+	}
+
+	if (MoveAction)
+	{
+		EnhancedInput->BindAction(MoveAction, ETriggerEvent::Triggered, this, &ADreamCharacter::Move);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("DreamCharacter 缺少 IA_Move 输入动作。"));
+	}
+
+	if (LookAction)
+	{
+		EnhancedInput->BindAction(LookAction, ETriggerEvent::Triggered, this, &ADreamCharacter::Look);
+	}
+	if (MouseLookAction)
+	{
+		EnhancedInput->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &ADreamCharacter::Look);
+	}
+	if (!LookAction && !MouseLookAction)
+	{
+		UE_LOG(LogTemp, Error, TEXT("DreamCharacter 缺少 IA_Look 和 IA_MouseLook 输入动作。"));
+	}
+}
+
+void ADreamCharacter::Move(const FInputActionValue& Value)
+{
+	const FVector2D MovementVector = Value.Get<FVector2D>();
+	DoMove(MovementVector.X, MovementVector.Y);
+}
+
+void ADreamCharacter::Look(const FInputActionValue& Value)
+{
+	const FVector2D LookAxis = Value.Get<FVector2D>();
+	DoLook(LookAxis.X, LookAxis.Y);
+}
+
+void ADreamCharacter::DoMove(float Right, float Forward)
+{
+	if (!Controller)
+	{
+		return;
+	}
+
+	// 以当前重力反方向作为“地面向上”，把控制器前方向投影到可行走平面。
+	// 这样官方模板的 WASD/手柄输入也能继续支持项目已有的自定义重力。
+	const FVector Up = -GetCharacterMovement()->GetGravityDirection();
+	FVector ForwardDirection = FVector::VectorPlaneProject(
+		Controller->GetControlRotation().Vector(), Up).GetSafeNormal();
+	if (ForwardDirection.IsNearlyZero())
+	{
+		ForwardDirection = FVector::VectorPlaneProject(GetActorForwardVector(), Up).GetSafeNormal();
+	}
+	if (ForwardDirection.IsNearlyZero())
+	{
+		ForwardDirection = FVector::ForwardVector;
+	}
+
+	const FVector RightDirection = Up.Cross(ForwardDirection).GetSafeNormal();
+	AddMovementInput(ForwardDirection, Forward);
+	AddMovementInput(RightDirection, Right);
+}
+
+void ADreamCharacter::DoLook(float Yaw, float Pitch)
+{
+	// 手办交互模式下鼠标负责在显示面上选点，不能同时改变第三人称相机。
+	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
+	{
+		if (DreamController->IsMiniatureInteractionMode())
+		{
+			return;
+		}
+	}
+
+	if (Controller)
+	{
+		AddControllerYawInput(Yaw);
+		AddControllerPitchInput(Pitch);
+	}
+}
+
+void ADreamCharacter::DoJumpStart()
+{
+	Jump();
+}
+
+void ADreamCharacter::DoJumpEnd()
+{
+	StopJumping();
+}
+
 void ADreamCharacter::MoveOnGravityPlane(const FVector2D& Input)
 {
-	if (!Controller || Input.IsNearlyZero())
-		return;
-	const FVector Up = -GetCharacterMovement()->GetGravityDirection();
-	FVector Forward = FVector::VectorPlaneProject(Controller->GetControlRotation().Vector(), Up).GetSafeNormal();
-	if (Forward.IsNearlyZero())
-		Forward = GetActorForwardVector();
-	const FVector Right = Up.Cross(Forward).GetSafeNormal();
-	AddMovementInput(Forward, Input.Y);
-	AddMovementInput(Right, Input.X);
-	const FVector Facing = (Forward * Input.Y + Right * Input.X).GetSafeNormal();
-	SetActorRotation(FRotationMatrix::MakeFromXZ(Facing, Up).ToQuat());
+	DoMove(Input.X, Input.Y);
 }

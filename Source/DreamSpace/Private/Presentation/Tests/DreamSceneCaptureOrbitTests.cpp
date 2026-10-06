@@ -174,11 +174,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureConfiguredProjectionTest,
 
 bool FDreamMiniatureConfiguredProjectionTest::RunTest(const FString& Parameters)
 {
-	// 回归此前漏测的运行时入口：加载真实角色蓝图（当前 RT=2200×2500、面片=80×80），
-	// 而非只测试绕过宽高比检查的纯数学辅助函数。瞬时世界不读取/保存用户关卡。
-	UClass* CharacterClass = LoadClass<ADreamCharacter>(nullptr,
-		TEXT("/Game/DreamInteraction/BP/BP_DreamCharacter.BP_DreamCharacter_C"));
-	if (!TestNotNull(TEXT("Project character blueprint exists"), CharacterClass))
+	// 回归最终运行时入口：直接生成原生 ADreamCharacter，避免测试继续依赖旧角色蓝图。
+	// 该测试仍使用瞬时世界，不读取或保存用户关卡；手办显示配置由 C++ 默认对象提供。
+	UClass* CharacterClass = ADreamCharacter::StaticClass();
+	if (!TestNotNull(TEXT("Native project character class exists"), CharacterClass))
 		return false;
 	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
 	ADreamCharacter* Character = World->SpawnActor<ADreamCharacter>(CharacterClass);
@@ -189,6 +188,16 @@ bool FDreamMiniatureConfiguredProjectionTest::RunTest(const FString& Parameters)
 	}
 	World->SpawnActor<ADreamSceneCaptureAnchor>();
 	FComponent* Miniature = Character->SceneMiniature;
+	TestNotNull(TEXT("Native character has a miniature presentation component"), Miniature);
+	if (!Miniature)
+	{
+		World->DestroyWorld(false);
+		return false;
+	}
+	// 这些值原先由 BP_DreamCharacter 覆盖；迁移到 C++ 后必须保持一致，
+	// 否则会改变真实项目的手办清晰度和 RenderTarget 长宽比。
+	TestEqual(TEXT("Native character preserves miniature RT width"), Miniature->RenderTargetWidth, 2200);
+	TestEqual(TEXT("Native character preserves miniature RT height"), Miniature->RenderTargetHeight, 2500);
 	Miniature->BeginPlay();
 	UStaticMeshComponent* Display = nullptr;
 	TArray<UStaticMeshComponent*> Meshes;
