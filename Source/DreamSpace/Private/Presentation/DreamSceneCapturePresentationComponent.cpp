@@ -9,6 +9,7 @@
 #include "Camera/CameraComponent.h"
 #include "Camera/CameraTypes.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/ChildActorComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
@@ -279,7 +280,8 @@ FTransform UDreamSceneCapturePresentationComponent::MapObserverWindowToCaptureWo
 	const float Scale = FMath::Max(FMath::Abs(InMiniatureSceneScale), KINDA_SMALL_NUMBER);
 	const float WindowDistance = FVector::Distance(ObserverLocation, FrameLocation) / Scale;
 
-	// 捕获相机位于锚点背后与观察者对称的一侧，沿视线看向锚点。
+	// 捕获相机相对锚点的偏移方向，与观察者相对面片中心的偏移方向相同；
+	// 因此两台相机从对应的一侧沿同一条视线看向各自的窗口中心。
 	const FQuat CaptureRotation = FRotationMatrix::MakeFromXZ(ViewDirection, Up).ToQuat();
 	return FTransform(CaptureRotation, AnchorLocation - ViewDirection * WindowDistance);
 }
@@ -294,6 +296,137 @@ float UDreamSceneCapturePresentationComponent::ComputeWindowFieldOfView(
 	const float Distance = FMath::Max(ObserverDistance, KINDA_SMALL_NUMBER);
 	return FMath::Clamp(
 		FMath::RadiansToDegrees(2.0f * FMath::Atan2(HalfWidth, Distance)), 1.0f, 170.0f);
+}
+
+bool UDreamSceneCapturePresentationComponent::MapWindowClickToCaptureRay(
+	const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
+	const FTransform& DisplayWorldTransform, const FBox& DisplayLocalBounds,
+	const FVector& WindowObserverLocation, const FVector& CaptureLocation,
+	bool bImageRotated180Degrees, FVector& OutDisplayHitPoint,
+	FVector& OutCaptureRayOrigin, FVector& OutCaptureRayDirection)
+{
+	OutDisplayHitPoint = FVector::ZeroVector;
+	OutCaptureRayOrigin = FVector::ZeroVector;
+	OutCaptureRayDirection = FVector::ZeroVector;
+	if (!DisplayLocalBounds.IsValid)
+		return false;
+
+	const FVector RayDirection = ViewRayDirection.GetSafeNormal();
+	const FVector PlaneNormal = DisplayWorldTransform.GetRotation().GetAxisZ();
+	if (RayDirection.IsNearlyZero())
+		return false;
+
+	// BasicShapes/Plane 的局部 +Z 是正面。只接受从正面射来的点击：既避免玩家
+	// 绕到手办背后仍能操作，也避免与平面平行时除以接近零的数。
+	const float RayDotNormal = FVector::DotProduct(RayDirection, PlaneNormal);
+	if (RayDotNormal >= -KINDA_SMALL_NUMBER)
+		return false;
+
+	// 显示网格没有查询碰撞，因此直接与其真实世界平面求交。Bounds 中心而不是
+	// 组件原点用于兼容原始网格枢轴不在中心的平面资产。
+	const FVector FrameCenter = DisplayWorldTransform.TransformPosition(DisplayLocalBounds.GetCenter());
+	const float HitDistance = FVector::DotProduct(FrameCenter - ViewRayOrigin, PlaneNormal) / RayDotNormal;
+	if (HitDistance <= 0.0f)
+		return false;
+	const FVector DisplayHit = ViewRayOrigin + RayDirection * HitDistance;
+	const FVector LocalHit = DisplayWorldTransform.InverseTransformPosition(DisplayHit);
+	constexpr float EdgeTolerance = 0.01f;
+	if (LocalHit.X < DisplayLocalBounds.Min.X - EdgeTolerance ||
+		LocalHit.X > DisplayLocalBounds.Max.X + EdgeTolerance ||
+		LocalHit.Y < DisplayLocalBounds.Min.Y - EdgeTolerance ||
+		LocalHit.Y > DisplayLocalBounds.Max.Y + EdgeTolerance)
+	{
+		return false;
+	}
+
+	// 在严格窗口模式中，捕获相机 C = A + (O - F) / s，显示面上的点 P 对应
+	// Q = A + (P - F) / s，因此 normalize(Q - C) = normalize(P - O)。
+	// O 必须是生成该帧 RT 时使用的“理想观察位置”；不能直接换成受墙面碰撞或
+	// 滚轮影响的实际玩家相机位置。显示面的前 180° 修正关闭时，基础 Plane
+	// 贴图方向相对捕获画面翻转，所以先将 P 关于平面中心翻转再计算方向。
+	const FVector SourcePoint = bImageRotated180Degrees
+		? DisplayHit : FrameCenter * 2.0f - DisplayHit;
+	const FVector CaptureDirection = (SourcePoint - WindowObserverLocation).GetSafeNormal();
+	if (CaptureDirection.IsNearlyZero())
+		return false;
+
+	OutDisplayHitPoint = DisplayHit;
+	OutCaptureRayOrigin = CaptureLocation;
+	OutCaptureRayDirection = CaptureDirection;
+	return true;
+}
+
+bool UDreamSceneCapturePresentationComponent::TryMapViewRayToCaptureRay(
+	const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
+	FVector& OutDisplayHitPoint, FVector& OutCaptureRayOrigin,
+	FVector& OutCaptureRayDirection) const
+{
+	OutDisplayHitPoint = FVector::ZeroVector;
+	OutCaptureRayOrigin = FVector::ZeroVector;
+	OutCaptureRayDirection = FVector::ZeroVector;
+	if (!bPresentationActive || !bHasWindowObserver || !DisplayMesh || !CaptureActor || !RenderTarget ||
+		!bFollowPlayerCamera || !bMatchCaptureFOVToDisplay ||
+		ProjectionType != ECameraProjectionMode::Perspective ||
+		DisplayFacingMode != EDreamMiniatureFacingMode::FaceCamera)
+	{
+		return false;
+	}
+
+	const UStaticMesh* MeshAsset = DisplayMesh->GetStaticMesh();
+	const USceneCaptureComponent2D* CaptureComponent = CaptureActor->GetCaptureComponent2D();
+	if (!MeshAsset || !CaptureComponent || RenderTarget->SizeX <= 0 || RenderTarget->SizeY <= 0 ||
+		DisplayWorldSize.X <= 0.0f || DisplayWorldSize.Y <= 0.0f)
+	{
+		return false;
+	}
+
+	// 直接复用真实世界射线的方向，要求面片与 RT 使用相同宽高比，且捕获 FOV
+	// 没有被极端距离触发的 1°/170° 限幅改变。否则显示图像已经不是严格窗口。
+	const float DisplayAspect = DisplayWorldSize.X / DisplayWorldSize.Y;
+	const float RenderAspect = static_cast<float>(RenderTarget->SizeX) / RenderTarget->SizeY;
+	const float UnclampedFOV = FMath::RadiansToDegrees(
+		2.0f * FMath::Atan2(DisplayWorldSize.X * 0.5f,
+			FMath::Max(LastWindowObserverDistance, KINDA_SMALL_NUMBER)));
+	if (!FMath::IsNearlyEqual(DisplayAspect, RenderAspect, 0.01f) ||
+		!FMath::IsNearlyEqual(CaptureComponent->FOVAngle, UnclampedFOV, 0.05f) ||
+		FVector::DotProduct(DisplayMesh->GetUpVector(), -CaptureActor->GetActorForwardVector()) < 0.995f)
+	{
+		return false;
+	}
+
+	const FBoxSphereBounds MeshBounds = MeshAsset->GetBounds();
+	const FVector DisplayScale = DisplayMesh->GetComponentScale();
+	const FVector2D ActualDisplaySize(
+		MeshBounds.BoxExtent.X * 2.0 * DisplayScale.X,
+		MeshBounds.BoxExtent.Y * 2.0 * DisplayScale.Y);
+	// FOV 根据 DisplayWorldSize 推导，父节点或 DisplayRelativeTransform 额外
+	// 缩放会改变玩家点到的物理位置，却不改变 RT 的 FOV。此时直接转移方向
+	// 会发生偏移，必须拒绝；需要调整大小时应改 DisplayWorldSize 并重建资源。
+	if (DisplayScale.X <= 0.0 || DisplayScale.Y <= 0.0 || DisplayScale.Z <= 0.0 ||
+		!ActualDisplaySize.Equals(DisplayWorldSize, 0.01))
+	{
+		return false;
+	}
+	// 显示资产必须是以中心为基准的薄矩形平面。自定义三维外壳仍可用来表现，
+	// 但不能把它的三维包围盒误当成一整块可点击的 RT 窗口。
+	if (MeshBounds.BoxExtent.X <= 0.0f || MeshBounds.BoxExtent.Y <= 0.0f ||
+		MeshBounds.BoxExtent.Z > 1.0f ||
+		!DisplayMesh->GetComponentTransform().TransformPosition(MeshBounds.Origin)
+			.Equals(DisplayMesh->GetComponentLocation(), 0.5f))
+	{
+		return false;
+	}
+	const FBox LocalBounds(MeshBounds.Origin - MeshBounds.BoxExtent,
+		MeshBounds.Origin + MeshBounds.BoxExtent);
+	if (!MapWindowClickToCaptureRay(
+		ViewRayOrigin, ViewRayDirection, DisplayMesh->GetComponentTransform(), LocalBounds,
+		LastWindowObserverLocation, CaptureActor->GetActorLocation(),
+		bRotateDisplayImage180Degrees, OutDisplayHitPoint, OutCaptureRayOrigin,
+		OutCaptureRayDirection))
+	{
+		return false;
+	}
+	return true;
 }
 
 void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
@@ -312,6 +445,7 @@ void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
 	}
 	RenderTarget = nullptr;
 	bPresentationActive = false;
+	bHasWindowObserver = false;
 }
 
 void UDreamSceneCapturePresentationComponent::SetPresentationActive(bool bActive)
@@ -332,6 +466,36 @@ void UDreamSceneCapturePresentationComponent::SetPresentationActive(bool bActive
 	}
 	if (bPresentationActive)
 		UpdateCaptureBlacklist();
+}
+
+void UDreamSceneCapturePresentationComponent::GetCaptureHiddenActors(TArray<AActor*>& OutActors) const
+{
+	OutActors.Reset();
+	auto AddWithChildActors = [&OutActors](AActor* RootActor)
+	{
+		TArray<AActor*> Pending;
+		Pending.Add(RootActor);
+		while (!Pending.IsEmpty())
+		{
+			AActor* Actor = Pending.Pop(EAllowShrinking::No);
+			if (!IsValid(Actor) || OutActors.Contains(Actor))
+				continue;
+			OutActors.Add(Actor);
+			// SceneCapture 的 HideActorComponents(Actor, true) 会递归排除
+			// ChildActorComponent 中的可渲染网格。碰撞拾取也必须略过对应的
+			// ChildActor，否则天空蓝图等仍可能在 RT 中不可见却挡住交互射线。
+			TInlineComponentArray<UChildActorComponent*> ChildComponents(Actor);
+			for (const UChildActorComponent* ChildComponent : ChildComponents)
+				if (AActor* ChildActor = ChildComponent->GetChildActor())
+					Pending.Add(ChildActor);
+		}
+	};
+	if (bHideOwnerActor)
+		AddWithChildActors(GetOwner());
+	AddWithChildActors(CaptureActor.Get());
+	AddWithChildActors(CameraOrbitAnchorActor.Get());
+	for (AActor* Actor : ActorsToHideFromCapture)
+		AddWithChildActors(Actor);
 }
 
 void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
@@ -364,16 +528,11 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
 		// 同时剔除这些子 Actor 的 Primitive，避免只隐藏蓝图外壳却漏掉天空球。
 		CaptureComponent->HideActorComponents(Actor, true);
 	};
-	if (bHideOwnerActor)
-		HideActor(GetOwner());
-	HideActor(CaptureActor);
-	if (IsValid(CameraOrbitAnchorActor))
-	{
-		// 专用锚点本身已默认隐藏；仍纳入捕获黑名单，兼容派生蓝图增加辅助网格。
-		HideActor(CameraOrbitAnchorActor);
-	}
-
-	for (AActor* Actor : ActorsToHideFromCapture)
+	// 捕获与交互拾取共用同一组 Actor 黑名单；否则玩家可能点到 RT 中根本
+	// 没有显示的天空球、角色或临时装饰。
+	TArray<AActor*> HiddenActors;
+	GetCaptureHiddenActors(HiddenActors);
+	for (AActor* Actor : HiddenActors)
 		HideActor(Actor);
 
 	// 调试线由世界的 LineBatcher 组件渲染，它们也是普通 Primitive，会被 SceneCapture
@@ -390,6 +549,7 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
 
 void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 {
+	bHasWindowObserver = false;
 	if (!CaptureActor || !GetWorld())
 		return;
 
@@ -408,6 +568,10 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 		// 否则画面会相对面片偏转或缩放，“透过手办看世界”就不成立。
 		CaptureActor->SetActorTransform(MapObserverWindowToCaptureWorld(
 			ObserverWorld, MiniatureFrame, SceneReference, MiniatureSceneScale));
+		LastWindowObserverLocation = ObserverWorld.GetLocation();
+		LastWindowObserverDistance = FVector::Distance(
+			ObserverWorld.GetLocation(), MiniatureFrame.GetLocation());
+		bHasWindowObserver = true;
 		if (CaptureComponent)
 		{
 			CaptureComponent->ProjectionType = ProjectionType;
@@ -417,9 +581,8 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 				{
 					// 视场角 = 面片在观察者眼中的张角。这样 RT 的整幅画面恰好覆盖
 					// 顺着面片看过去的那一束角度，面片边缘对应画面边缘。
-					const float ObserverDistance = FVector::Distance(
-						ObserverWorld.GetLocation(), MiniatureFrame.GetLocation());
-					CaptureComponent->FOVAngle = ComputeWindowFieldOfView(DisplayWorldSize.X, ObserverDistance);
+					CaptureComponent->FOVAngle = ComputeWindowFieldOfView(
+						DisplayWorldSize.X, LastWindowObserverDistance);
 				}
 				else
 				{

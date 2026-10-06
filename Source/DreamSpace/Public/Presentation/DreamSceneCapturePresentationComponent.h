@@ -122,7 +122,7 @@ public:
 	 * 面片朝向也取自这条视线，不会跟着抖动。
 	 * 观察目标上找不到 SpringArm 时自动使用真实相机位置。
 	 */
-	UPROPERTY(EditAnywhere, Category = “场景缩略图|坐标映射”)
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	bool bIgnoreSpringArmCollision = true;
 
 	/**
@@ -131,7 +131,7 @@ public:
 	 * 关闭时，手办用固定的 ObserverArmLength 计算观察位置，玩家用滚轮拉近拉远
 	 * 第三人称相机时手办画面保持不变。开启时手办视角跟随实际臂长变化。
 	 */
-	UPROPERTY(EditAnywhere, Category = “场景缩略图|坐标映射”)
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	bool bFollowCameraZoom = false;
 
 	/**
@@ -142,8 +142,8 @@ public:
 	 * 手办仍使用这个固定值，因此画面不会跟着推近。
 	 * 如果想调整手办的取景角度（比如建筑偏离画面中心），改这个值而不是实际臂长。
 	 */
-	UPROPERTY(EditAnywhere, Category = “场景缩略图|坐标映射”,
-		meta = (ClampMin = “50”, UIMin = “50”, EditCondition = “!bFollowCameraZoom”, EditConditionHides))
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射",
+		meta = (ClampMin = "50", UIMin = "50", EditCondition = "!bFollowCameraZoom", EditConditionHides))
 	float ObserverArmLength = 420.0f;
 
 	/**
@@ -302,7 +302,7 @@ public:
 	 *   因此锚点落在画面正中。注意它不是观察者前方向——第三人称相机的前方向穿过角色，
 	 *   并不穿过面片；
 	 * - 取景距离 = 观察者到面片的距离 / MiniatureSceneScale。捕获相机位于
-	 *   锚点 − dir × 取景距离，即锚点背后与观察者对称的那一侧；
+	 *   锚点 − dir × 取景距离，与观察者相对面片中心的偏移方向相同；
 	 * - 视场角 = 面片在观察者眼中的张角，见 ComputeWindowFieldOfView。
 	 *
 	 * 上方向取观察者的上方向并正交化到垂直于 dir，与 FaceCamera 面片的竖直方向一致。
@@ -334,6 +334,41 @@ public:
 	UFUNCTION(BlueprintPure, Category = "场景缩略图")
 	bool IsPresentationActive() const { return bPresentationActive; }
 
+	/**
+	 * 把玩家相机穿过手办显示面的射线，映射为 SceneCapture 所见真实世界中的射线。
+	 *
+	 * 本函数只计算几何关系，不检测真实目标，也不调用任何玩法组件。它依赖当前的
+	 * “严格窗口”配置：跟随玩家、透视投影、FOV 匹配面片张角、FaceCamera 平面。
+	 * 玩家相机可能被墙推近或被滚轮改变臂长，因此先用实际鼠标射线求显示面交点，
+	 * 再用本组件上一次取景时采用的理想观察位置计算捕获射线方向。
+	 *
+	 * @param ViewRayOrigin 玩家相机鼠标射线起点，世界空间。
+	 * @param ViewRayDirection 玩家相机鼠标射线方向，世界空间，不要求调用方预先归一化。
+	 * @param OutDisplayHitPoint 命中的手办显示面位置，供控制器检查近处遮挡。
+	 * @param OutCaptureRayOrigin SceneCapture 发射交互射线的世界位置。
+	 * @param OutCaptureRayDirection 指向 RT 对应像素的世界单位方向。
+	 */
+	bool TryMapViewRayToCaptureRay(
+		const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
+		FVector& OutDisplayHitPoint, FVector& OutCaptureRayOrigin,
+		FVector& OutCaptureRayDirection) const;
+
+	/** 返回 SceneCapture 不渲染的 Actor；拾取射线也要跳过它们，避免点击到画面里不存在的物体。 */
+	void GetCaptureHiddenActors(TArray<AActor*>& OutActors) const;
+
+	/**
+	 * 严格窗口的纯几何计算，单独暴露以便自动化测试中心、边缘、背面和越界情况。
+	 * DisplayLocalBounds 使用显示网格原始尺寸；DisplayWorldTransform 包含缩放。
+	 * 默认基础 Plane 在 bRotateDisplayImage180Degrees 开启时图像方向与世界轴对齐；
+	 * 关闭时视觉画面旋转 180 度，所以在求捕获方向前把点击点绕面片中心翻转。
+	 */
+	static bool MapWindowClickToCaptureRay(
+		const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
+		const FTransform& DisplayWorldTransform, const FBox& DisplayLocalBounds,
+		const FVector& WindowObserverLocation, const FVector& CaptureLocation,
+		bool bImageRotated180Degrees, FVector& OutDisplayHitPoint,
+		FVector& OutCaptureRayOrigin, FVector& OutCaptureRayDirection);
+
 private:
 	/** 运行时动态创建的场景捕获 Actor；它只属于表现层，不注册为交互装配体。 */
 	UPROPERTY(Transient)
@@ -352,6 +387,12 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> DisplayMaterialInstance;
 
 	bool bPresentationActive = false;
+	/** 最近一次更新捕获相机时使用的理想观察位置；与 CaptureActor 的姿态属于同一帧。 */
+	FVector LastWindowObserverLocation = FVector::ZeroVector;
+	/** 同一次取景的观察者到面片中心距离，用于验证当前 FOV 没有脱离严格窗口关系。 */
+	float LastWindowObserverDistance = 0.0f;
+	/** 仅在严格窗口分支成功更新过观察位置后才允许进行射线映射。 */
+	bool bHasWindowObserver = false;
 
 	void CreatePresentationResources();
 	void DestroyPresentationResources();

@@ -1,5 +1,6 @@
 #include "DreamPlayerController.h"
 #include "DreamCharacter.h"
+#include "DreamSceneCapturePresentationComponent.h"
 #include "DreamInteractableInterface.h"
 #include "DreamSpace.h"
 #include "EnhancedInputComponent.h"
@@ -9,9 +10,17 @@
 #include "InputModifiers.h"
 #include "Components/ActorComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/Actor.h"
 #include "Engine/HitResult.h"
 #include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
+
+// 调试开关只影响点击时的可视化，不参与拾取或玩法。捕获组件已把调试线从 RT 中剔除。
+static bool bDreamMiniatureInteractionDebugDraw = false;
+static FAutoConsoleVariableRef CVarDreamMiniatureInteractionDebugDraw(
+	TEXT("dream.DebugMiniatureInteraction"), bDreamMiniatureInteractionDebugDraw,
+	TEXT("显示手办点击的玩家射线、捕获射线和命中点。0=关闭，1=开启。"), ECVF_Default);
 
 void ADreamPlayerController::BeginPlay()
 {
@@ -29,6 +38,8 @@ void ADreamPlayerController::ReceivedPlayer()
 
 void ADreamPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
+	if (bMiniatureInteractionMode && IsLocalController())
+		SetMiniatureInteractionMode(false);
 	// 退出时移除动态创建的输入映射，避免泄漏到下一次会话。
 	if (bMappingApplied && Mapping && GetLocalPlayer())
 		if (auto* Input = GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
@@ -65,6 +76,8 @@ void ADreamPlayerController::SetupInputComponent()
 		Input->BindAction(Action, ETriggerEvent::Started, this, Method);
 	};
 	Button(EKeys::E, &ADreamPlayerController::Interact);
+	Button(EKeys::Tab, &ADreamPlayerController::ToggleMiniatureInteractionMode);
+	Button(EKeys::LeftMouseButton, &ADreamPlayerController::InteractWithMiniature);
 	// 空格跳跃需要同时监听按下与松开。
 	auto* Jump = NewObject<UInputAction>(this);
 	Actions.Add(Jump);
@@ -118,7 +131,7 @@ void ADreamPlayerController::ApplyInputMapping()
 	{
 		Input->AddMappingContext(Mapping, 0);
 		bMappingApplied = true;
-		UE_LOG(LogDreamSpace, Verbose, TEXT("已为玩家控制器安装运行时输入映射（包含 E 交互键）。"));
+		UE_LOG(LogDreamSpace, Verbose, TEXT("已为玩家控制器安装运行时输入映射（E、Tab 和手办左键）。"));
 	}
 }
 
@@ -143,6 +156,9 @@ void ADreamPlayerController::Move(const FInputActionValue& Value)
 }
 void ADreamPlayerController::Look(const FInputActionValue& Value)
 {
+	// 光标模式中鼠标移动负责选择手办上的位置，不能同时驱动第三人称相机。
+	if (bMiniatureInteractionMode)
+		return;
 	const auto Axis = Value.Get<FVector2D>();
 	AddYawInput(Axis.X);
 	AddPitchInput(Axis.Y);
@@ -179,6 +195,9 @@ void ADreamPlayerController::EndJump()
 }
 void ADreamPlayerController::Interact()
 {
+	// 手办模式下 E 不应越过手办去触发主视口中心的世界物体。
+	if (bMiniatureInteractionMode)
+		return;
 	// 从相机中心向前做射线检测，命中后调用该 Actor 上所有实现了可交互接口的组件。
 	// 控制器只做“触发”，具体行为（转动、开关门等）完全由组件自身决定。
 	FVector Origin;
@@ -218,6 +237,119 @@ void ADreamPlayerController::Interact()
 	DispatchInteraction(Hit.GetActor(), Hit.GetComponent());
 }
 
+void ADreamPlayerController::ToggleMiniatureInteractionMode()
+{
+	SetMiniatureInteractionMode(!bMiniatureInteractionMode);
+}
+
+void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled)
+{
+	if (bMiniatureInteractionMode == bEnabled || !IsLocalController())
+		return;
+	bMiniatureInteractionMode = bEnabled;
+	bShowMouseCursor = bEnabled;
+	if (bEnabled)
+	{
+		// GameAndUI 仍把 Enhanced Input 的 Tab/左键交给控制器，同时允许鼠标
+		// 自由移动到手办画面任意位置；没有聚焦 Widget，故无需依赖 UMG。
+		FInputModeGameAndUI InputMode;
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		InputMode.SetHideCursorDuringCapture(false);
+		SetInputMode(InputMode);
+	}
+	else
+	{
+		// 恢复原来的第三人称鼠标捕获方式；Look 的保护条件随状态一起解除。
+		SetInputMode(FInputModeGameOnly());
+	}
+	UE_LOG(LogDreamSpace, Log, TEXT("手办交互模式：%s"), bEnabled ? TEXT("开启") : TEXT("关闭"));
+}
+
+void ADreamPlayerController::InteractWithMiniature()
+{
+	if (!bMiniatureInteractionMode || !GetWorld())
+		return;
+	const ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
+	const UDreamSceneCapturePresentationComponent* Miniature =
+		ControlledCharacter ? ControlledCharacter->SceneMiniature.Get() : nullptr;
+	if (!Miniature)
+		return;
+
+	// 玩家看到手办所用的是实际第三人称相机，因此先把屏幕鼠标坐标反投影成
+	// 实际视线。Capture 的理想观察位置由表现组件保存，不能在这里用实际
+	// 相机原点代替：SpringArm 遇墙缩短或滚轮缩放时两者可能不同。
+	FVector ViewRayOrigin, ViewRayDirection;
+	if (!DeprojectMousePositionToWorld(ViewRayOrigin, ViewRayDirection))
+		return;
+	FVector DisplayHit, CaptureOrigin, CaptureDirection;
+	if (!Miniature->TryMapViewRayToCaptureRay(
+		ViewRayOrigin, ViewRayDirection, DisplayHit, CaptureOrigin, CaptureDirection))
+	{
+		if (bDreamMiniatureInteractionDebugDraw)
+			UE_LOG(LogDreamSpace, Log, TEXT("手办点击未落在可映射的显示面，或未启用严格窗口配置。"));
+		return;
+	}
+
+	// 显示平面本身无碰撞。如果真实世界的墙、道具等挡在玩家相机与平面之间，
+	// 此次点击应视为点击遮挡物，不能穿过去操作手办。
+	FCollisionQueryParams ViewParams(SCENE_QUERY_STAT(DreamMiniatureViewOcclusion), true);
+	ViewParams.AddIgnoredActor(GetPawn());
+	FHitResult ViewBlocker;
+	const FVector SafeDisplayEnd = DisplayHit - ViewRayDirection.GetSafeNormal();
+	if (GetWorld()->LineTraceSingleByChannel(
+		ViewBlocker, ViewRayOrigin, SafeDisplayEnd, InteractTraceChannel, ViewParams))
+	{
+		if (bDreamMiniatureInteractionDebugDraw)
+		{
+			DrawDebugLine(GetWorld(), ViewRayOrigin, ViewBlocker.ImpactPoint,
+				FColor::Orange, false, 2.5f, 0, 2.0f);
+			UE_LOG(LogDreamSpace, Log, TEXT("手办点击被主视口物体挡住：%s"),
+				*GetNameSafe(ViewBlocker.GetActor()));
+		}
+		return;
+	}
+
+	// RT 只是一张纹理，不能给出背后模型的深度或 Actor。真正的目标必须从
+	// SceneCapture 原点沿映射方向重新做一次真实世界碰撞检测。它距离建筑
+	// 通常在一万厘米量级，因此使用独立于普通 E 交互的较长检测距离。
+	FCollisionQueryParams CaptureParams(SCENE_QUERY_STAT(DreamMiniatureCapturePick), true);
+	CaptureParams.AddIgnoredActor(GetPawn());
+	TArray<AActor*> CaptureHiddenActors;
+	Miniature->GetCaptureHiddenActors(CaptureHiddenActors);
+	for (AActor* HiddenActor : CaptureHiddenActors)
+		CaptureParams.AddIgnoredActor(HiddenActor);
+	const FVector CaptureEnd = CaptureOrigin + CaptureDirection * MiniatureInteractTraceDistance;
+	FHitResult CaptureHit;
+	const bool bCapturedHit = GetWorld()->LineTraceSingleByChannel(
+		CaptureHit, CaptureOrigin, CaptureEnd, InteractTraceChannel, CaptureParams);
+
+	if (bDreamMiniatureInteractionDebugDraw)
+	{
+		DrawDebugLine(GetWorld(), ViewRayOrigin, DisplayHit, FColor::Cyan, false, 2.5f, 0, 2.0f);
+		DrawDebugSphere(GetWorld(), DisplayHit, 3.0f, 8, FColor::Cyan, false, 2.5f);
+		DrawDebugLine(GetWorld(), CaptureOrigin,
+			bCapturedHit ? CaptureHit.ImpactPoint : CaptureEnd,
+			bCapturedHit ? FColor::Green : FColor::Red, false, 2.5f, 0, 2.0f);
+		if (bCapturedHit)
+			DrawDebugSphere(GetWorld(), CaptureHit.ImpactPoint, 12.0f, 12, FColor::Yellow, false, 2.5f);
+	}
+
+	// 背景、墙面或其他没有交互组件的首个命中物只负责遮挡，不应让射线
+	// “穿透”到后面的机关，也不应像开发期 E 交互那样刷出无组件警告。
+	AActor* HitActor = bCapturedHit ? CaptureHit.GetActor() : nullptr;
+	UActorComponent* HitComponent = bCapturedHit ? CaptureHit.GetComponent() : nullptr;
+	if (!HitActor)
+		return;
+	const bool bHitComponentInteractable = HitComponent &&
+		HitComponent->GetClass()->ImplementsInterface(UDreamInteractableInterface::StaticClass());
+	if (!bHitComponentInteractable &&
+		HitActor->GetComponentsByInterface(UDreamInteractableInterface::StaticClass()).IsEmpty())
+	{
+		return;
+	}
+	DispatchInteraction(HitActor, HitComponent);
+}
+
 void ADreamPlayerController::DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent)
 {
 	if (!HitActor && HitComponent)
@@ -247,10 +379,10 @@ void ADreamPlayerController::DispatchInteraction(AActor* HitActor, UActorCompone
 	}
 
 	UE_LOG(LogDreamSpace, Verbose,
-		TEXT("E 交互命中 Actor=%s Component=%s，可交互组件=%d。"),
+		TEXT("交互命中 Actor=%s Component=%s，可交互组件=%d。"),
 		*GetNameSafe(HitActor), *GetNameSafe(HitComponent), Dispatched.Num());
 	if (Dispatched.IsEmpty())
 		UE_LOG(LogDreamSpace, Warning,
-			TEXT("E 交互命中了 Actor [%s]，但其上没有实现 IDreamInteractableInterface 的组件。"),
+			TEXT("交互命中了 Actor [%s]，但其上没有实现 IDreamInteractableInterface 的组件。"),
 			*GetNameSafe(HitActor));
 }

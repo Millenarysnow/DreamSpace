@@ -21,6 +21,8 @@ public:
 	virtual void ReceivedPlayer() override;
 	virtual void SetupInputComponent() override;
 	virtual void UpdateRotation(float DeltaTime) override;
+	/** 当前是否显示鼠标、允许直接点击手办中的物体。供开发期 HUD 显示操作提示。 */
+	bool IsMiniatureInteractionMode() const { return bMiniatureInteractionMode; }
 
 private:
 	/** 运行时动态创建的输入映射上下文，不依赖任何内容侧资产配置。 */
@@ -36,6 +38,9 @@ private:
 	/** 交互射线使用的碰撞通道；默认 Visibility，关卡网格需要阻挡该通道。 */
 	UPROPERTY(EditAnywhere, Category = "交互")
 	TEnumAsByte<ECollisionChannel> InteractTraceChannel = ECC_Visibility;
+	/** 手办中的射线从远处的 SceneCapture 发出，不能复用普通 E 交互的 600 cm 距离。 */
+	UPROPERTY(EditAnywhere, Category = "交互|手办", meta = (ClampMin = "1.0", UIMin = "1000.0"))
+	float MiniatureInteractTraceDistance = 50000.0f;
 
 	/** 滚轮每一档改变 SpringArm 长度的量（厘米）；负值反转滚轮方向。 */
 	UPROPERTY(EditAnywhere, Category = "相机")
@@ -57,10 +62,16 @@ private:
 	void EndJump();
 	/** E 键触发：对视线命中的 Actor 调用其身上所有可交互组件。 */
 	void Interact();
+	/** Tab 切换光标模式：进入时暂停鼠标转视角，左键改为点击手办画面。 */
+	void ToggleMiniatureInteractionMode();
+	void SetMiniatureInteractionMode(bool bEnabled);
+	/** 左键触发：实际相机射线命中显示面，再映射成 SceneCapture 的世界射线。 */
+	void InteractWithMiniature();
 	/** 在本地玩家已绑定后安装运行时创建的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
 	void DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent);
 
 	bool bMappingApplied = false;
+	bool bMiniatureInteractionMode = false;
 };

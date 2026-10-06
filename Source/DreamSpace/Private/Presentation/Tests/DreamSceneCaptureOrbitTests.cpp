@@ -2,6 +2,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
+#include "Math/RotationMatrix.h"
 
 namespace
 {
@@ -37,13 +38,14 @@ bool FDreamSceneCaptureWindowTest::RunTest(const FString& Parameters)
 		Capture.GetRotation().GetForwardVector().Equals(
 			(SceneReference.GetLocation() - Capture.GetLocation()).GetSafeNormal(), 0.001f));
 
-	// 取景距离 = 眼睛到面片的距离 ÷ 比例，捕获相机落在锚点背后与观察者对称的一侧。
+	// 取景距离 = 眼睛到面片的距离 ÷ 比例。观察者相对面片中心的偏移
+	// 与捕获相机相对锚点的偏移方向相同；两个局部窗口坐标系按比例对应。
 	TestTrue(TEXT("Window distance is the observer distance divided by the scale"),
 		FMath::IsNearlyEqual(FVector::Distance(Capture.GetLocation(), SceneReference.GetLocation()),
 			ObserverDistance / Scale, 0.05f));
-	TestTrue(TEXT("Observer and capture sit on opposite sides of the anchor"),
-		((Observer.GetLocation() - SceneReference.GetLocation()) |
-			(Capture.GetLocation() - SceneReference.GetLocation())) < 0.0f);
+	TestTrue(TEXT("Observer and capture have matching offsets from their window centers"),
+		(Observer.GetLocation() - Frame.GetLocation()).GetSafeNormal().Equals(
+			(Capture.GetLocation() - SceneReference.GetLocation()).GetSafeNormal(), 0.001f));
 
 	// 眼睛离面片越远，等效相机退得越远，但视角方向不变。
 	FTransform FartherObserver = Observer;
@@ -116,6 +118,74 @@ bool FDreamSceneCaptureWindowRayTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Plane half-extent subtends half the window FOV"),
 			FMath::IsNearlyEqual(HalfAngleDegrees, ExpectedHalfFOV, 0.05f));
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureClickRayTest,
+	"DreamSpace.Presentation.MiniatureClickRays",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamMiniatureClickRayTest::RunTest(const FString& Parameters)
+{
+	// 采用真实窗口数学构造捕获相机和平面，并故意让鼠标所属的实际相机偏离
+	// 捕获使用的理想观察位置：这覆盖滚轮改变臂长或 SpringArm 被墙推近的情况。
+	const FVector FrameCenter(75.0f, 55.0f, 95.0f);
+	const FVector Anchor(120.0f, -60.0f, 30.0f);
+	const FVector IdealObserver(-300.0f, 0.0f, 200.0f);
+	const FVector ActualCamera = IdealObserver + FVector(35.0f, 15.0f, -12.0f);
+	constexpr float Scale = 0.03f;
+	const FTransform Capture = FComponent::MapObserverWindowToCaptureWorld(
+		FTransform((FrameCenter - IdealObserver).Rotation(), IdealObserver),
+		FTransform(FrameCenter), FTransform(Anchor), Scale);
+	const FVector CaptureRight = Capture.GetRotation().GetRightVector();
+	const FVector CaptureUp = Capture.GetRotation().GetUpVector();
+	const FVector PlaneNormal = -Capture.GetRotation().GetForwardVector();
+	const FTransform Display(
+		FRotationMatrix::MakeFromXZ(CaptureRight, PlaneNormal).ToQuat(),
+		FrameCenter, FVector(0.8f, 0.8f, 1.0f));
+	const FBox PlaneLocalBounds(FVector(-50.0f, -50.0f, -0.5f),
+		FVector(50.0f, 50.0f, 0.5f));
+
+	for (const FVector2D& Offset : {
+		FVector2D::ZeroVector, FVector2D(30.0f, 0.0f),
+		FVector2D(-30.0f, 20.0f), FVector2D(0.0f, -30.0f) })
+	{
+		const FVector ClickPoint = FrameCenter + CaptureRight * Offset.X + CaptureUp * Offset.Y;
+		FVector DisplayHit, RayOrigin, RayDirection;
+		const bool bMapped = FComponent::MapWindowClickToCaptureRay(
+			ActualCamera, ClickPoint - ActualCamera, Display, PlaneLocalBounds,
+			IdealObserver, Capture.GetLocation(), true, DisplayHit, RayOrigin, RayDirection);
+		TestTrue(TEXT("Visible point on the display maps to a capture ray"), bMapped);
+		if (!bMapped)
+			continue;
+		TestTrue(TEXT("View ray hits the chosen point on the hand display"),
+			DisplayHit.Equals(ClickPoint, 0.01f));
+		TestTrue(TEXT("Mapped ray starts at the actual capture camera"),
+			RayOrigin.Equals(Capture.GetLocation(), 0.01f));
+		const FVector CorrespondingWorldPoint = Anchor + (ClickPoint - FrameCenter) / Scale;
+		TestTrue(TEXT("Mapped ray points toward the exact scaled world point"),
+			RayDirection.Equals((CorrespondingWorldPoint - RayOrigin).GetSafeNormal(), 0.001f));
+	}
+
+	// 关闭基础 Plane 的 180° 图像修正时，点到的像素恰好在面片中心的另一侧。
+	const FVector RightClickPoint = FrameCenter + CaptureRight * 25.0f;
+	FVector DisplayHit, RayOrigin, RayDirection;
+	TestTrue(TEXT("Unrotated image still maps"), FComponent::MapWindowClickToCaptureRay(
+		ActualCamera, RightClickPoint - ActualCamera, Display, PlaneLocalBounds,
+		IdealObserver, Capture.GetLocation(), false, DisplayHit, RayOrigin, RayDirection));
+	TestTrue(TEXT("Unrotated image reverses both planar image axes"),
+		RayDirection.Equals((FrameCenter - CaptureRight * 25.0f - IdealObserver).GetSafeNormal(), 0.001f));
+
+	const FVector OutsidePoint = FrameCenter + CaptureRight * 50.0f;
+	TestFalse(TEXT("A click outside the plane cannot activate the world"),
+		FComponent::MapWindowClickToCaptureRay(
+			ActualCamera, OutsidePoint - ActualCamera, Display, PlaneLocalBounds,
+			IdealObserver, Capture.GetLocation(), true, DisplayHit, RayOrigin, RayDirection));
+	const FVector BehindDisplay = FrameCenter - PlaneNormal * 100.0f;
+	TestFalse(TEXT("A click from the back of the plane cannot activate the world"),
+		FComponent::MapWindowClickToCaptureRay(
+			BehindDisplay, FrameCenter - BehindDisplay, Display, PlaneLocalBounds,
+			IdealObserver, Capture.GetLocation(), true, DisplayHit, RayOrigin, RayDirection));
 	return true;
 }
 
