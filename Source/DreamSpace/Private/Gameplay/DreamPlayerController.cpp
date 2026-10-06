@@ -265,33 +265,77 @@ void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled)
 	UE_LOG(LogDreamSpace, Log, TEXT("手办交互模式：%s"), bEnabled ? TEXT("开启") : TEXT("关闭"));
 }
 
+bool ADreamPlayerController::GetMiniatureClickDebug(
+	FVector2D& OutPosition, FString& OutMessage, FLinearColor& OutColor) const
+{
+	if (!bDreamMiniatureInteractionDebugDraw || !GetWorld() ||
+		MiniatureDebugMessage.IsEmpty() || GetWorld()->GetRealTimeSeconds() > MiniatureDebugUntil)
+		return false;
+	OutPosition = MiniatureDebugPosition;
+	OutMessage = MiniatureDebugMessage;
+	OutColor = FLinearColor(MiniatureDebugColor);
+	return true;
+}
+
+void ADreamPlayerController::ReportMiniatureClick(const FString& Message, const FColor& Color)
+{
+	if (!bDreamMiniatureInteractionDebugDraw)
+		return;
+	float MouseX = 0.0f, MouseY = 0.0f;
+	GetMousePosition(MouseX, MouseY);
+	MiniatureDebugPosition = FVector2D(MouseX, MouseY);
+	MiniatureDebugMessage = Message;
+	MiniatureDebugColor = Color;
+	MiniatureDebugUntil = GetWorld()->GetRealTimeSeconds() + 6.0;
+	UE_LOG(LogDreamSpace, Log, TEXT("[手办点击] %s"), *Message);
+}
+
 void ADreamPlayerController::InteractWithMiniature()
 {
 	if (!bMiniatureInteractionMode || !GetWorld())
 		return;
+
+	// 实际相机可能因 SpringArm 碰撞或滚轮缩放偏离捕获使用的理想观察位置。
+	// 鼠标视线只用来求面片交点；随后按 RT 投影重新计算捕获相机的射线。
+	FVector ViewRayOrigin, ViewRayDirection;
+	if (!DeprojectMousePositionToWorld(ViewRayOrigin, ViewRayDirection))
+	{
+		ReportMiniatureClick(TEXT("无法取得鼠标视线，请将光标移入游戏视口"), FColor::Red);
+		return;
+	}
+	InteractWithMiniatureRay(ViewRayOrigin, ViewRayDirection);
+}
+
+void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection)
+{
 	const ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
 	const UDreamSceneCapturePresentationComponent* Miniature =
 		ControlledCharacter ? ControlledCharacter->SceneMiniature.Get() : nullptr;
 	if (!Miniature)
-		return;
-
-	// 玩家看到手办所用的是实际第三人称相机，因此先把屏幕鼠标坐标反投影成
-	// 实际视线。Capture 的理想观察位置由表现组件保存，不能在这里用实际
-	// 相机原点代替：SpringArm 遇墙缩短或滚轮缩放时两者可能不同。
-	FVector ViewRayOrigin, ViewRayDirection;
-	if (!DeprojectMousePositionToWorld(ViewRayOrigin, ViewRayDirection))
-		return;
-	FVector DisplayHit, CaptureOrigin, CaptureDirection;
-	if (!Miniature->TryMapViewRayToCaptureRay(
-		ViewRayOrigin, ViewRayDirection, DisplayHit, CaptureOrigin, CaptureDirection))
 	{
-		if (bDreamMiniatureInteractionDebugDraw)
-			UE_LOG(LogDreamSpace, Log, TEXT("手办点击未落在可映射的显示面，或未启用严格窗口配置。"));
+		ReportMiniatureClick(TEXT("当前角色没有手办表现组件"), FColor::Red);
 		return;
 	}
 
-	// 显示平面本身无碰撞。如果真实世界的墙、道具等挡在玩家相机与平面之间，
-	// 此次点击应视为点击遮挡物，不能穿过去操作手办。
+	FVector DisplayHit, CaptureOrigin, CaptureDirection;
+	FString FailureReason;
+	if (!Miniature->TryMapViewRayToCaptureRay(ViewRayOrigin, ViewRayDirection,
+		DisplayHit, CaptureOrigin, CaptureDirection, FailureReason))
+	{
+		// 失败也绘制尝试射线，不能把全部调试放到映射成功之后。
+		if (bDreamMiniatureInteractionDebugDraw)
+			DrawDebugLine(GetWorld(), ViewRayOrigin, ViewRayOrigin + ViewRayDirection * 1000.0,
+				FColor::Red, false, 6.0f, 1, 2.0f);
+		ReportMiniatureClick(FailureReason, FColor::Red);
+		return;
+	}
+	if (bDreamMiniatureInteractionDebugDraw)
+	{
+		DrawDebugLine(GetWorld(), ViewRayOrigin, DisplayHit, FColor::Cyan, false, 6.0f, 1, 2.0f);
+		DrawDebugSphere(GetWorld(), DisplayHit, 3.0f, 12, FColor::Cyan, false, 6.0f, 1, 1.5f);
+	}
+
+	// 显示网格无碰撞，仍需防止穿过真实墙体点击它；忽略持有手办的角色自身。
 	FCollisionQueryParams ViewParams(SCENE_QUERY_STAT(DreamMiniatureViewOcclusion), true);
 	ViewParams.AddIgnoredActor(GetPawn());
 	FHitResult ViewBlocker;
@@ -300,18 +344,15 @@ void ADreamPlayerController::InteractWithMiniature()
 		ViewBlocker, ViewRayOrigin, SafeDisplayEnd, InteractTraceChannel, ViewParams))
 	{
 		if (bDreamMiniatureInteractionDebugDraw)
-		{
 			DrawDebugLine(GetWorld(), ViewRayOrigin, ViewBlocker.ImpactPoint,
-				FColor::Orange, false, 2.5f, 0, 2.0f);
-			UE_LOG(LogDreamSpace, Log, TEXT("手办点击被主视口物体挡住：%s"),
-				*GetNameSafe(ViewBlocker.GetActor()));
-		}
+				FColor::Orange, false, 6.0f, 1, 2.0f);
+		ReportMiniatureClick(FString::Printf(TEXT("显示面被近处物体遮挡：%s"),
+			*GetNameSafe(ViewBlocker.GetActor())), FColor::Orange);
 		return;
 	}
 
-	// RT 只是一张纹理，不能给出背后模型的深度或 Actor。真正的目标必须从
-	// SceneCapture 原点沿映射方向重新做一次真实世界碰撞检测。它距离建筑
-	// 通常在一万厘米量级，因此使用独立于普通 E 交互的较长检测距离。
+	// 从 Capture 光心重新做真实世界检测。它距离建筑通常有上万厘米，
+	// 因此不能复用普通 E 交互的 600 cm 距离；捕获黑名单同时参与碰撞过滤。
 	FCollisionQueryParams CaptureParams(SCENE_QUERY_STAT(DreamMiniatureCapturePick), true);
 	CaptureParams.AddIgnoredActor(GetPawn());
 	TArray<AActor*> CaptureHiddenActors;
@@ -322,32 +363,35 @@ void ADreamPlayerController::InteractWithMiniature()
 	FHitResult CaptureHit;
 	const bool bCapturedHit = GetWorld()->LineTraceSingleByChannel(
 		CaptureHit, CaptureOrigin, CaptureEnd, InteractTraceChannel, CaptureParams);
-
 	if (bDreamMiniatureInteractionDebugDraw)
 	{
-		DrawDebugLine(GetWorld(), ViewRayOrigin, DisplayHit, FColor::Cyan, false, 2.5f, 0, 2.0f);
-		DrawDebugSphere(GetWorld(), DisplayHit, 3.0f, 8, FColor::Cyan, false, 2.5f);
-		DrawDebugLine(GetWorld(), CaptureOrigin,
-			bCapturedHit ? CaptureHit.ImpactPoint : CaptureEnd,
-			bCapturedHit ? FColor::Green : FColor::Red, false, 2.5f, 0, 2.0f);
+		DrawDebugLine(GetWorld(), CaptureOrigin, bCapturedHit ? CaptureHit.ImpactPoint : CaptureEnd,
+			bCapturedHit ? FColor::Green : FColor::Red, false, 6.0f, 0, 2.0f);
 		if (bCapturedHit)
-			DrawDebugSphere(GetWorld(), CaptureHit.ImpactPoint, 12.0f, 12, FColor::Yellow, false, 2.5f);
+			DrawDebugSphere(GetWorld(), CaptureHit.ImpactPoint, 12.0f, 12, FColor::Yellow, false, 6.0f);
 	}
 
-	// 背景、墙面或其他没有交互组件的首个命中物只负责遮挡，不应让射线
-	// “穿透”到后面的机关，也不应像开发期 E 交互那样刷出无组件警告。
 	AActor* HitActor = bCapturedHit ? CaptureHit.GetActor() : nullptr;
 	UActorComponent* HitComponent = bCapturedHit ? CaptureHit.GetComponent() : nullptr;
 	if (!HitActor)
+	{
+		ReportMiniatureClick(TEXT("已映射；捕获射线未命中，请检查目标碰撞、通道和检测距离"), FColor::Red);
 		return;
+	}
+	// 首个非交互物体仍是遮挡物，不能穿过去寻找后方机关。
 	const bool bHitComponentInteractable = HitComponent &&
 		HitComponent->GetClass()->ImplementsInterface(UDreamInteractableInterface::StaticClass());
 	if (!bHitComponentInteractable &&
 		HitActor->GetComponentsByInterface(UDreamInteractableInterface::StaticClass()).IsEmpty())
 	{
+		ReportMiniatureClick(FString::Printf(TEXT("已命中 %s / %s，但该 Actor 没有交互组件"),
+			*GetNameSafe(HitActor), *GetNameSafe(HitComponent)), FColor::Yellow);
 		return;
 	}
 	DispatchInteraction(HitActor, HitComponent);
+	// 这里只能确认已分发；组件是否正在运动或缺少枢轴，应由组件自身日志解释。
+	ReportMiniatureClick(FString::Printf(TEXT("已向 %s / %s 发送交互"),
+		*GetNameSafe(HitActor), *GetNameSafe(HitComponent)), FColor::Green);
 }
 
 void ADreamPlayerController::DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent)

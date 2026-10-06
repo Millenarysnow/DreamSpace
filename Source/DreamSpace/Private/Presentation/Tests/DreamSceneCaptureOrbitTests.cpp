@@ -3,6 +3,19 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
 #include "Math/RotationMatrix.h"
+#include "DreamCharacter.h"
+#include "DreamPlayerController.h"
+#include "DreamSceneCaptureAnchor.h"
+#include "DreamPivotPointComponent.h"
+#include "DreamRotatableComponent.h"
+#include "DreamTranslatableComponent.h"
+#include "HAL/IConsoleManager.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/SceneCapture2D.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Engine/World.h"
+#include "StaticMeshResources.h"
 
 namespace
 {
@@ -127,65 +140,193 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureClickRayTest,
 
 bool FDreamMiniatureClickRayTest::RunTest(const FString& Parameters)
 {
-	// 采用真实窗口数学构造捕获相机和平面，并故意让鼠标所属的实际相机偏离
-	// 捕获使用的理想观察位置：这覆盖滚轮改变臂长或 SpringArm 被墙推近的情况。
-	const FVector FrameCenter(75.0f, 55.0f, 95.0f);
-	const FVector Anchor(120.0f, -60.0f, 30.0f);
-	const FVector IdealObserver(-300.0f, 0.0f, 200.0f);
-	const FVector ActualCamera = IdealObserver + FVector(35.0f, 15.0f, -12.0f);
-	constexpr float Scale = 0.03f;
-	const FTransform Capture = FComponent::MapObserverWindowToCaptureWorld(
-		FTransform((FrameCenter - IdealObserver).Rotation(), IdealObserver),
-		FTransform(FrameCenter), FTransform(Anchor), Scale);
-	const FVector CaptureRight = Capture.GetRotation().GetRightVector();
-	const FVector CaptureUp = Capture.GetRotation().GetUpVector();
-	const FVector PlaneNormal = -Capture.GetRotation().GetForwardVector();
-	const FTransform Display(
-		FRotationMatrix::MakeFromXZ(CaptureRight, PlaneNormal).ToQuat(),
-		FrameCenter, FVector(0.8f, 0.8f, 1.0f));
-	const FBox PlaneLocalBounds(FVector(-50.0f, -50.0f, -0.5f),
-		FVector(50.0f, 50.0f, 0.5f));
-
-	for (const FVector2D& Offset : {
-		FVector2D::ZeroVector, FVector2D(30.0f, 0.0f),
-		FVector2D(-30.0f, 20.0f), FVector2D(0.0f, -30.0f) })
+	const FBox Bounds(FVector(-50, -50, 0), FVector(50, 50, 0));
+	const FVector Camera(30, -20, 400);
+	FVector Hit;
+	FVector2D UV;
+	FString Reason;
+	// 在实际相机偏离平面中心、面片非等比缩放及绕法线旋转时，纹理坐标仍须稳定。
+	for (float Angle : { 0.0f, 180.0f })
 	{
-		const FVector ClickPoint = FrameCenter + CaptureRight * Offset.X + CaptureUp * Offset.Y;
-		FVector DisplayHit, RayOrigin, RayDirection;
-		const bool bMapped = FComponent::MapWindowClickToCaptureRay(
-			ActualCamera, ClickPoint - ActualCamera, Display, PlaneLocalBounds,
-			IdealObserver, Capture.GetLocation(), true, DisplayHit, RayOrigin, RayDirection);
-		TestTrue(TEXT("Visible point on the display maps to a capture ray"), bMapped);
-		if (!bMapped)
-			continue;
-		TestTrue(TEXT("View ray hits the chosen point on the hand display"),
-			DisplayHit.Equals(ClickPoint, 0.01f));
-		TestTrue(TEXT("Mapped ray starts at the actual capture camera"),
-			RayOrigin.Equals(Capture.GetLocation(), 0.01f));
-		const FVector CorrespondingWorldPoint = Anchor + (ClickPoint - FrameCenter) / Scale;
-		TestTrue(TEXT("Mapped ray points toward the exact scaled world point"),
-			RayDirection.Equals((CorrespondingWorldPoint - RayOrigin).GetSafeNormal(), 0.001f));
+		const FTransform Display(FRotator(0, Angle, 0), FVector(15, 20, 60), FVector(0.8, 1.2, 1));
+		for (const FVector2D Expected : { FVector2D(0.5, 0.5), FVector2D(0, 0), FVector2D(1, 1), FVector2D(0.25, 0.75) })
+		{
+			const FVector Point = Display.TransformPosition(FVector(Expected.X * 100 - 50, Expected.Y * 100 - 50, 0));
+			TestTrue(TEXT("Visible point maps under scaling and image rotation"),
+				FComponent::MapViewRayToDisplayUV(Camera, Point - Camera, Display, Bounds, Hit, UV, Reason));
+			TestTrue(TEXT("UV follows the actual displayed image without double flipping"), UV.Equals(Expected, 0.0001));
+			TestTrue(TEXT("Physical hit is preserved for foreground occlusion"), Hit.Equals(Point, 0.001));
+		}
+	}
+	TestFalse(TEXT("Outside display rejected"), FComponent::MapViewRayToDisplayUV(
+		Camera, FVector(100, 0, 0) - Camera, FTransform::Identity, Bounds, Hit, UV, Reason));
+	TestFalse(TEXT("Failure explains why mapping stopped"), Reason.IsEmpty());
+	TestFalse(TEXT("Back face rejected"), FComponent::MapViewRayToDisplayUV(
+		FVector(0, 0, -100), FVector::UpVector, FTransform::Identity, Bounds, Hit, UV, Reason));
+	TestFalse(TEXT("Parallel ray rejected"), FComponent::MapViewRayToDisplayUV(
+		Camera, FVector::ForwardVector, FTransform::Identity, Bounds, Hit, UV, Reason));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureConfiguredProjectionTest,
+	"DreamSpace.Presentation.MiniatureConfiguredProjection",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamMiniatureConfiguredProjectionTest::RunTest(const FString& Parameters)
+{
+	// 回归此前漏测的运行时入口：加载真实角色蓝图（当前 RT=2200×2500、面片=80×80），
+	// 而非只测试绕过宽高比检查的纯数学辅助函数。瞬时世界不读取/保存用户关卡。
+	UClass* CharacterClass = LoadClass<ADreamCharacter>(nullptr,
+		TEXT("/Game/DreamInteraction/BP/BP_DreamCharacter.BP_DreamCharacter_C"));
+	if (!TestNotNull(TEXT("Project character blueprint exists"), CharacterClass))
+		return false;
+	UWorld* World = UWorld::CreateWorld(EWorldType::Game, false);
+	ADreamCharacter* Character = World->SpawnActor<ADreamCharacter>(CharacterClass);
+	if (!TestNotNull(TEXT("Character spawns in isolated world"), Character))
+	{
+		World->DestroyWorld(false);
+		return false;
+	}
+	World->SpawnActor<ADreamSceneCaptureAnchor>();
+	FComponent* Miniature = Character->SceneMiniature;
+	Miniature->BeginPlay();
+	UStaticMeshComponent* Display = nullptr;
+	TArray<UStaticMeshComponent*> Meshes;
+	Character->GetComponents(Meshes);
+	for (UStaticMeshComponent* Mesh : Meshes)
+		if (Mesh->GetFName() == TEXT("SceneCaptureDisplayMesh"))
+			Display = Mesh;
+	ASceneCapture2D* Capture = nullptr;
+	for (AActor* Actor : World->PersistentLevel->Actors)
+		if (ASceneCapture2D* Candidate = Cast<ASceneCapture2D>(Actor))
+			Capture = Candidate;
+	if (!TestNotNull(TEXT("Real presentation creates display"), Display) ||
+		!TestNotNull(TEXT("Real presentation creates capture"), Capture))
+	{
+		World->DestroyWorld(false);
+		return false;
 	}
 
-	// 关闭基础 Plane 的 180° 图像修正时，点到的像素恰好在面片中心的另一侧。
-	const FVector RightClickPoint = FrameCenter + CaptureRight * 25.0f;
-	FVector DisplayHit, RayOrigin, RayDirection;
-	TestTrue(TEXT("Unrotated image still maps"), FComponent::MapWindowClickToCaptureRay(
-		ActualCamera, RightClickPoint - ActualCamera, Display, PlaneLocalBounds,
-		IdealObserver, Capture.GetLocation(), false, DisplayHit, RayOrigin, RayDirection));
-	TestTrue(TEXT("Unrotated image reverses both planar image axes"),
-		RayDirection.Equals((FrameCenter - CaptureRight * 25.0f - IdealObserver).GetSafeNormal(), 0.001f));
+	// 直接检查默认资源的顶点 UV，防止数学推导与真实 Plane 的 UV 朝向相反。
+	const FStaticMeshLODResources& LOD = Display->GetStaticMesh()->GetRenderData()->LODResources[0];
+	const FBox Bounds = Display->GetStaticMesh()->GetBoundingBox();
+	for (uint32 Index = 0; Index < LOD.VertexBuffers.PositionVertexBuffer.GetNumVertices(); ++Index)
+	{
+		const FVector Vertex(LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(Index));
+		const FVector2f MeshUV = LOD.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(Index, 0);
+		FVector Hit;
+		FVector2D UV;
+		FString Reason;
+		TestTrue(TEXT("Plane vertex is inside analytical click bounds"), FComponent::MapViewRayToDisplayUV(
+			Vertex + FVector(0, 0, 100), -FVector::UpVector, FTransform::Identity, Bounds, Hit, UV, Reason));
+		TestTrue(TEXT("Analytical UV agrees with actual Engine Plane UV0"), UV.Equals(FVector2D(MeshUV), 0.001));
+	}
 
-	const FVector OutsidePoint = FrameCenter + CaptureRight * 50.0f;
-	TestFalse(TEXT("A click outside the plane cannot activate the world"),
-		FComponent::MapWindowClickToCaptureRay(
-			ActualCamera, OutsidePoint - ActualCamera, Display, PlaneLocalBounds,
-			IdealObserver, Capture.GetLocation(), true, DisplayHit, RayOrigin, RayDirection));
-	const FVector BehindDisplay = FrameCenter - PlaneNormal * 100.0f;
-	TestFalse(TEXT("A click from the back of the plane cannot activate the world"),
-		FComponent::MapWindowClickToCaptureRay(
-			BehindDisplay, FrameCenter - BehindDisplay, Display, PlaneLocalBounds,
-			IdealObserver, Capture.GetLocation(), true, DisplayHit, RayOrigin, RayDirection));
+	Capture->SetActorLocationAndRotation(FVector(10000, -3000, 2000), FRotator(-15, 35, 0));
+	USceneCaptureComponent2D* CaptureComponent = Capture->GetCaptureComponent2D();
+	CaptureComponent->FOVAngle = 45;
+	const FTransform CaptureTransform = CaptureComponent->GetComponentTransform();
+	const FTransform DisplayTransform(FRotationMatrix::MakeFromXZ(
+		Capture->GetActorRightVector(), -Capture->GetActorForwardVector()).ToQuat(), FVector(75, 55, 95), FVector(0.8));
+	Display->SetWorldTransform(DisplayTransform);
+	const FVector Camera = DisplayTransform.GetLocation() - Capture->GetActorForwardVector() * 350 + FVector(0, 10, 30);
+
+	// 同时覆盖实际蓝图尺寸及方形/横向/纵向 RT；期望方向独立使用透视相机解析式计算。
+	for (const FIntPoint Size : { FIntPoint(Miniature->RenderTargetWidth, Miniature->RenderTargetHeight),
+		FIntPoint(1024, 1024), FIntPoint(2500, 2200), FIntPoint(2200, 2500) })
+	{
+		Miniature->GetRenderTarget()->ResizeTarget(Size.X, Size.Y);
+		for (const FVector2D UV : { FVector2D(0.5, 0.5), FVector2D(0.25, 0.75), FVector2D(0.8, 0.2) })
+		{
+			const FVector Point = Display->GetComponentTransform().TransformPosition(FVector(UV.X * 100 - 50, UV.Y * 100 - 50, 0));
+			FVector Hit, Origin, Direction;
+			FString Reason;
+			const bool bMapped = Miniature->TryMapViewRayToCaptureRay(Camera, Point - Camera, Hit, Origin, Direction, Reason);
+			TestTrue(FString::Printf(TEXT("Runtime mapping accepts %dx%d: %s"), Size.X, Size.Y, *Reason), bMapped);
+			const double HalfTan = FMath::Tan(FMath::DegreesToRadians(22.5));
+			const FVector Expected = CaptureTransform.TransformVectorNoScale(FVector(1,
+				(2 * UV.X - 1) * HalfTan, (1 - 2 * UV.Y) * HalfTan * Size.Y / Size.X)).GetSafeNormal();
+			// UE 反投影把像素取整，边缘允许不到一个像素的误差。
+			TestTrue(TEXT("Ray matches render projection including portrait aspect ratio"), Direction.Equals(Expected, 0.002));
+			TestTrue(TEXT("Ray starts at capture optical center"), Origin.Equals(Capture->GetActorLocation(), 0.001));
+		}
+	}
+	// 复用鼠标事件真正调用的控制器路径；通过真实碰撞命中并检查组件运动后的姿态，
+	// 避免“映射函数返回 true”被误当成“世界已经响应”。整个场景只存在于测试内存中。
+	ADreamPlayerController* Controller = World->SpawnActor<ADreamPlayerController>();
+	Controller->Possess(Character);
+	auto SpawnCube = [World](const FVector& Location)
+	{
+		AActor* Actor = World->SpawnActor<AActor>();
+		UStaticMeshComponent* Mesh = NewObject<UStaticMeshComponent>(Actor);
+		Actor->SetRootComponent(Mesh);
+		Actor->AddInstanceComponent(Mesh);
+		Mesh->SetMobility(EComponentMobility::Movable);
+		Mesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+		Mesh->SetCollisionProfileName(TEXT("BlockAll"));
+		Mesh->RegisterComponent();
+		Actor->SetActorLocation(Location);
+		return Actor;
+	};
+	const FVector TargetLocation = Capture->GetActorLocation() + Capture->GetActorForwardVector() * 2000;
+	AActor* Target = SpawnCube(TargetLocation);
+	UDreamPivotPointComponent* Pivot = NewObject<UDreamPivotPointComponent>(Target);
+	Target->AddInstanceComponent(Pivot);
+	Pivot->SetupAttachment(Target->GetRootComponent());
+	Pivot->RegisterComponent();
+	UDreamRotatableComponent* Rotation = NewObject<UDreamRotatableComponent>(Target);
+	Target->AddInstanceComponent(Rotation);
+	Rotation->RegisterComponent();
+	UDreamTranslatableComponent* Translation = NewObject<UDreamTranslatableComponent>(Target);
+	Target->AddInstanceComponent(Translation);
+	Translation->RegisterComponent();
+	const FVector ClickDirection = Display->GetComponentLocation() - Camera;
+
+	// 屏幕诊断不需要真正的鼠标才能验证：开启 CVar 后必须在成功和失败路径都有结果。
+	IConsoleVariable* Debug = IConsoleManager::Get().FindConsoleVariable(TEXT("dream.DebugMiniatureInteraction"));
+	const bool bPreviousDebug = Debug->GetBool();
+	Debug->Set(true, ECVF_SetByCode);
+	Controller->InteractWithMiniatureRay(Camera, ClickDirection);
+	TestTrue(TEXT("Click through portrait RT starts rotation"), Rotation->IsRotating());
+	TestTrue(TEXT("Same hit dispatches translation component"), Translation->IsTranslating());
+	Rotation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	Translation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("World actor really rotated 90 degrees"), Target->GetActorRotation().Equals(FRotator(0, 90, 0), 0.01));
+	TestTrue(TEXT("World actor really translated 100 cm"), Target->GetActorLocation().Equals(TargetLocation + FVector(100, 0, 0), 0.01));
+	FVector2D DebugPosition;
+	FString DebugMessage;
+	FLinearColor DebugColor;
+	TestTrue(TEXT("Successful click has visible HUD feedback"), Controller->GetMiniatureClickDebug(DebugPosition, DebugMessage, DebugColor));
+	TestTrue(TEXT("Successful dispatch reports green"), DebugColor.Equals(FLinearColor(FColor::Green)));
+
+	// 将机关复位，再验证近处遮挡、世界首个非交互遮挡，以及捕获黑名单的行为。
+	Target->SetActorLocationAndRotation(TargetLocation, FRotator::ZeroRotator);
+	AActor* Blocker = SpawnCube((Camera + Display->GetComponentLocation()) * 0.5);
+	Controller->InteractWithMiniatureRay(Camera, ClickDirection);
+	TestFalse(TEXT("Foreground obstruction prevents dispatch"), Rotation->IsRotating());
+	TestTrue(TEXT("Blocked click also has HUD feedback"), Controller->GetMiniatureClickDebug(DebugPosition, DebugMessage, DebugColor));
+	TestTrue(TEXT("Foreground obstruction reports orange"), DebugColor.Equals(FLinearColor(FColor::Orange)));
+	Blocker->SetActorLocation(Capture->GetActorLocation() + Capture->GetActorForwardVector() * 1000);
+	Controller->InteractWithMiniatureRay(Camera, ClickDirection);
+	TestFalse(TEXT("Non-interactable first world hit blocks target behind it"), Rotation->IsRotating());
+	Miniature->ActorsToHideFromCapture.Add(Blocker);
+	Miniature->TickComponent(0, LEVELTICK_All, nullptr);
+	// Tick 更新取景后，恢复测试固定的捕获姿态与显示姿态。
+	Capture->SetActorTransform(CaptureTransform);
+	Display->SetWorldTransform(DisplayTransform);
+	Controller->InteractWithMiniatureRay(Camera, ClickDirection);
+	TestTrue(TEXT("Hidden capture actor is also skipped by picking"), Rotation->IsRotating());
+	Controller->InteractWithMiniatureRay(Camera, Display->GetComponentTransform().TransformPosition(FVector(100, 0, 0)) - Camera);
+	TestTrue(TEXT("Mapping failure has HUD feedback"), Controller->GetMiniatureClickDebug(DebugPosition, DebugMessage, DebugColor));
+	TestTrue(TEXT("Mapping failure reports red"), DebugColor.Equals(FLinearColor(FColor::Red)));
+	Debug->Set(bPreviousDebug, ECVF_SetByCode);
+	Miniature->SetPresentationEnabled(false);
+	FVector Hit, Origin, Direction;
+	FString Reason;
+	TestFalse(TEXT("Disabled presentation cannot interact"), Miniature->TryMapViewRayToCaptureRay(
+		Camera, Display->GetComponentLocation() - Camera, Hit, Origin, Direction, Reason));
+	TestFalse(TEXT("Disabled presentation returns an explanation"), Reason.IsEmpty());
+	World->DestroyWorld(false);
 	return true;
 }
 

@@ -335,39 +335,28 @@ public:
 	bool IsPresentationActive() const { return bPresentationActive; }
 
 	/**
-	 * 把玩家相机穿过手办显示面的射线，映射为 SceneCapture 所见真实世界中的射线。
-	 *
-	 * 本函数只计算几何关系，不检测真实目标，也不调用任何玩法组件。它依赖当前的
-	 * “严格窗口”配置：跟随玩家、透视投影、FOV 匹配面片张角、FaceCamera 平面。
-	 * 玩家相机可能被墙推近或被滚轮改变臂长，因此先用实际鼠标射线求显示面交点，
-	 * 再用本组件上一次取景时采用的理想观察位置计算捕获射线方向。
-	 *
-	 * @param ViewRayOrigin 玩家相机鼠标射线起点，世界空间。
-	 * @param ViewRayDirection 玩家相机鼠标射线方向，世界空间，不要求调用方预先归一化。
-	 * @param OutDisplayHitPoint 命中的手办显示面位置，供控制器检查近处遮挡。
-	 * @param OutCaptureRayOrigin SceneCapture 发射交互射线的世界位置。
-	 * @param OutCaptureRayDirection 指向 RT 对应像素的世界单位方向。
+	 * 将实际玩家相机射线映射到 SceneCapture 的真实世界射线，并给出可读失败原因。
+	 * 先求显示面 UV，再按当前捕获投影反算方向；面片与 RT 宽高比无需一致。
+	 * 支持透视投影、正缩放的薄矩形平面，以及默认 Plane 的 UV0/直接采样材质。
+	 * 本函数仅计算映射；近处遮挡、世界碰撞与交互分发由控制器负责。
 	 */
 	bool TryMapViewRayToCaptureRay(
 		const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
 		FVector& OutDisplayHitPoint, FVector& OutCaptureRayOrigin,
-		FVector& OutCaptureRayDirection) const;
+		FVector& OutCaptureRayDirection, FString& OutFailureReason) const;
 
-	/** 返回 SceneCapture 不渲染的 Actor；拾取射线也要跳过它们，避免点击到画面里不存在的物体。 */
+	/** 返回 SceneCapture 不渲染的 Actor；拾取射线也跳过它们及其 ChildActor。 */
 	void GetCaptureHiddenActors(TArray<AActor*>& OutActors) const;
 
 	/**
-	 * 严格窗口的纯几何计算，单独暴露以便自动化测试中心、边缘、背面和越界情况。
-	 * DisplayLocalBounds 使用显示网格原始尺寸；DisplayWorldTransform 包含缩放。
-	 * 默认基础 Plane 在 bRotateDisplayImage180Degrees 开启时图像方向与世界轴对齐；
-	 * 关闭时视觉画面旋转 180 度，所以在求捕获方向前把点击点绕面片中心翻转。
+	 * 无碰撞平面的解析求交：输出默认 Plane UV0 布局下的纹理坐标。
+	 * 纯几何函数便于覆盖越界、背面、图像旋转、缩放和实际相机偏移的回归测试。
+	 * 180° 修正由显示面的真实变换体现，调用者不可再次翻转 UV。
 	 */
-	static bool MapWindowClickToCaptureRay(
+	static bool MapViewRayToDisplayUV(
 		const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
 		const FTransform& DisplayWorldTransform, const FBox& DisplayLocalBounds,
-		const FVector& WindowObserverLocation, const FVector& CaptureLocation,
-		bool bImageRotated180Degrees, FVector& OutDisplayHitPoint,
-		FVector& OutCaptureRayOrigin, FVector& OutCaptureRayDirection);
+		FVector& OutDisplayHitPoint, FVector2D& OutUV, FString& OutFailureReason);
 
 private:
 	/** 运行时动态创建的场景捕获 Actor；它只属于表现层，不注册为交互装配体。 */
@@ -387,12 +376,6 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> DisplayMaterialInstance;
 
 	bool bPresentationActive = false;
-	/** 最近一次更新捕获相机时使用的理想观察位置；与 CaptureActor 的姿态属于同一帧。 */
-	FVector LastWindowObserverLocation = FVector::ZeroVector;
-	/** 同一次取景的观察者到面片中心距离，用于验证当前 FOV 没有脱离严格窗口关系。 */
-	float LastWindowObserverDistance = 0.0f;
-	/** 仅在严格窗口分支成功更新过观察位置后才允许进行射线映射。 */
-	bool bHasWindowObserver = false;
 
 	void CreatePresentationResources();
 	void DestroyPresentationResources();

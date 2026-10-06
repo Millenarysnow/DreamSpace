@@ -23,6 +23,8 @@ public:
 	virtual void UpdateRotation(float DeltaTime) override;
 	/** 当前是否显示鼠标、允许直接点击手办中的物体。供开发期 HUD 显示操作提示。 */
 	bool IsMiniatureInteractionMode() const { return bMiniatureInteractionMode; }
+	/** HUD 在屏幕上显示最近一次点击的十字和结果，避免沿视线的世界调试线缩成一个点。 */
+	bool GetMiniatureClickDebug(FVector2D& OutPosition, FString& OutMessage, FLinearColor& OutColor) const;
 
 private:
 	/** 运行时动态创建的输入映射上下文，不依赖任何内容侧资产配置。 */
@@ -67,10 +69,20 @@ private:
 	void SetMiniatureInteractionMode(bool bEnabled);
 	/** 左键触发：实际相机射线命中显示面，再映射成 SceneCapture 的世界射线。 */
 	void InteractWithMiniature();
+	/** 与鼠标输入解耦的完整拾取路径，自动化测试可直接提供一条已知的实际视线。 */
+	void InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection);
+	friend class FDreamMiniatureConfiguredProjectionTest;
 	/** 在本地玩家已绑定后安装运行时创建的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
 	void DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent);
+
+	/** 每条退出路径都记录诊断；仅在调试 CVar 开启时输出，不影响玩法结果。 */
+	void ReportMiniatureClick(const FString& Message, const FColor& Color);
+	FVector2D MiniatureDebugPosition = FVector2D::ZeroVector;
+	FString MiniatureDebugMessage;
+	FColor MiniatureDebugColor = FColor::White;
+	double MiniatureDebugUntil = 0.0;
 
 	bool bMappingApplied = false;
 	bool bMiniatureInteractionMode = false;
