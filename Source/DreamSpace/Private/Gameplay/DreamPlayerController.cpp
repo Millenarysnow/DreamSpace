@@ -99,6 +99,12 @@ void ADreamPlayerController::SetupInputComponent()
 	MapAxis(LookAction, EKeys::MouseX, false, false);
 	MapAxis(LookAction, EKeys::MouseY, true, true);
 	Input->BindAction(LookAction, ETriggerEvent::Triggered, this, &ADreamPlayerController::Look);
+	// 鼠标滚轮：Axis1D，向上滚动为正、向下为负。
+	auto* ZoomAction = NewObject<UInputAction>(this);
+	Actions.Add(ZoomAction);
+	ZoomAction->ValueType = EInputActionValueType::Axis1D;
+	Mapping->MapKey(ZoomAction, EKeys::MouseWheelAxis);
+	Input->BindAction(ZoomAction, ETriggerEvent::Triggered, this, &ADreamPlayerController::ZoomCamera);
 	ApplyInputMapping();
 }
 
@@ -140,6 +146,26 @@ void ADreamPlayerController::Look(const FInputActionValue& Value)
 	const auto Axis = Value.Get<FVector2D>();
 	AddYawInput(Axis.X);
 	AddPitchInput(Axis.Y);
+}
+void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
+{
+	const float WheelDelta = Value.Get<float>();
+	if (FMath::IsNearlyZero(WheelDelta))
+		return;
+
+	auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
+	if (!ControlledCharacter)
+		return;
+	USpringArmComponent* SpringArm = ControlledCharacter->FindComponentByClass<USpringArmComponent>();
+	if (!SpringArm)
+		return;
+
+	// 向上滚动（WheelDelta > 0）拉近相机，向下滚动拉远。
+	// CameraZoomStep 为负时可以反转方向。
+	const float NewLength = FMath::Clamp(
+		SpringArm->TargetArmLength - WheelDelta * CameraZoomStep,
+		MinCameraArmLength, MaxCameraArmLength);
+	SpringArm->TargetArmLength = NewLength;
 }
 void ADreamPlayerController::StartJump()
 {

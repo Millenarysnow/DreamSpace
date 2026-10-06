@@ -66,75 +66,85 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
 	TEnumAsByte<ECameraProjectionMode::Type> ProjectionType = ECameraProjectionMode::Perspective;
 
-	/** 透视捕获的水平视场角。 */
+	/**
+	 * 窗口模式下手动指定的水平视场角。
+	 *
+	 * 只在 bMatchCaptureFOVToDisplay 关闭、或未跟随玩家相机时使用。窗口模式下默认
+	 * 由面片的张角自动推出视场角，手填一个值会让画面相对面片缩放，破坏窗口对应关系。
+	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "5", ClampMax = "170"))
 	float CaptureFOV = 60.0f;
+
+	/**
+	 * 是否让捕获视场角等于面片在观察者眼中的张角；默认开启，这是严格窗口模式。
+	 *
+	 * 面片宽度为 W、眼睛到面片距离为 d 时，视场角取 2·atan((W/2) / d)。
+	 * 只有这样，顺着面片看过去的那一束角度才与 RT 的整幅画面一一对应：
+	 * 面片边缘对应画面边缘，画面上下的方向也与面片一致。
+	 * 手填固定角度会让画面相对面片放大或缩小，视差就不再是窗口的视差。
+	 * 关闭后使用 CaptureFOV。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获")
+	bool bMatchCaptureFOVToDisplay = true;
 
 	/** 自动取景时在包围球外额外留出的比例。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float AutoFramePadding = 1.25f;
 
 	/**
-	 * 捕获相机到场景中心的距离。
+	 * 未跟随玩家相机时，固定取景相机的取景距离。
 	 *
-	 * 跟随玩家相机的固定轨道模式下，它是捕获相机到锚点的固定半径，决定手办内的景别；
-	 * 观察相机的推拉、SpringArm 被障碍推近都不会改变它。未跟随玩家相机时作为固定取景距离。
+	 * 跟随玩家相机时不再使用：那时捕获相机到锚点的距离由观察者到面片的实际距离
+	 * 按 MiniatureSceneScale 还原得到，也就是窗口模式的取景距离。
 	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|捕获", meta = (ClampMin = "1", UIMin = "1"))
 	float CaptureDistance = 2400.0f;
 
 	/**
-	 * 真实场景映射到手办空间时使用的统一缩放。
+	 * 手办的场景缩放，也决定“窗口里能装下多大的真实场景”；默认 0.03。
 	 *
-	 * 例如 0.1 表示真实场景中的 100 cm，在手办中占 10 cm。
-	 * 只在等比映射路径（bUseFixedCaptureOrbit 关闭）中使用：观察相机相对面片的
-	 * 偏移除以此比例后还原到被捕获场景。该路径的取景距离随观察相机到面片的
-	 * 实际距离变化，镜头推近时手办画面也会一起推近。
+	 * 这是窗口模式唯一的景别旋钮：真实场景中 1/s 单位的内容会被装进 1 单位的
+	 * 面片里，因此窗口覆盖的真实范围 ≈ DisplayWorldSize / MiniatureSceneScale。
+	 * 例如面片 80、比例 0.03 时，窗口大约覆盖 80/0.03 ≈ 2667 cm（约 27 m）的建筑。
+	 * 比例越小，装下的建筑越大、手办显得越“深”；比例越大，越像是贴着建筑看。
+	 *
+	 * 注意视场角不随本值变化：它只由面片张角决定，因此调本值相当于换镜头焦距，
+	 * 而不是改取景距离。
 	 */
-	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (ClampMin = "0.001", UIMin = "0.001"))
-	float MiniatureSceneScale = 0.25f;
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (ClampMin = "0.0001", UIMin = "0.0001"))
+	float MiniatureSceneScale = 0.03f;
 
 	/**
-	 * 是否使用固定半径轨道映射观察相机；默认开启。
+	 * 是否忽略 SpringArm 的碰撞修正，用”未被障碍推近的理想镜头位置”观察手办。
 	 *
-	 * 开启时，捕获相机始终在锚点周围、距离为 CaptureDistance 的球面上并看向锚点：
-	 * - 观察方向默认取“观察相机 -> 面片中心”的视线，映射进手办坐标系：
-	 *   dir = normalize(面片位置 − 观察相机位置)，捕获相机放在锚点 − dir × 距离；
-	 * - 画面上方向取观察相机的上方向，面片法线与视线一致，与 FaceCamera 的面片对齐；
-	 * - 视场角使用 CaptureFOV，与观察相机的 FOV 无关；
-	 * - 观察相机的前后位移不会改变捕获距离。
-	 *
-	 * 关闭时退回等比映射：捕获相机 = 锚点 ⊕ (观察相机 − 面片) / MiniatureSceneScale，
-	 * 并沿用观察相机的旋转和 FOV。
-	 */
-	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
-	bool bUseFixedCaptureOrbit = true;
-
-	/**
-	 * 固定轨道的观察方向是否取“观察相机 -> 面片中心”的视线；默认开启。
-	 *
-	 * 这是真实手办的取景方式：捕获相机放在锚点沿视线方向的反侧，
-	 * dir = normalize(面片世界位置 − 观察相机世界位置)，位置 = 锚点 − dir × CaptureDistance。
-	 * 玩家绕着角色转，就从对应的一侧、对应的俯角看到建筑；面片也严格垂直于这条视线，
-	 * 不会出现透视压缩。观察位置取 SpringArm 未经碰撞缩短的理想位置，
-	 * 因此镜头被挤近不会改变这个方向。
-	 *
-	 * 关闭时改用观察相机的前方向：捕获相机的转动与鼠标绕转 1:1 对应，
-	 * 但面片与视线之间会差一个随面片偏移和臂长变化的夹角。
-	 */
-	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射", meta = (EditCondition = "bUseFixedCaptureOrbit"))
-	bool bOrbitAlongLineOfSightToDisplay = true;
-
-	/**
-	 * 是否忽略 SpringArm 的碰撞修正，用“未被障碍推近的理想镜头位置”计算手办视角。
-	 *
-	 * 遵循的映射始终是“观察相机 -> 面片中心”的视线，因此该选项只改变观察位置
-	 * 的取值，不改变取景方向。
-	 * 面片朝向在固定轨道模式下与捕获视线一致，其他模式仍朝向真实相机。
+	 * 窗口模式的取景方向与取景距离都来自观察位置，而观察位置取 SpringArm 按
+	 * TargetArmLength 算出、未经碰撞缩短的值，因此镜头贴墙被挤近时手办画面不变。
+	 * 面片朝向也取自这条视线，不会跟着抖动。
 	 * 观察目标上找不到 SpringArm 时自动使用真实相机位置。
 	 */
-	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
+	UPROPERTY(EditAnywhere, Category = “场景缩略图|坐标映射”)
 	bool bIgnoreSpringArmCollision = true;
+
+	/**
+	 * 是否让手办视角跟随玩家相机的臂长调整（滚轮缩放）；默认关闭。
+	 *
+	 * 关闭时，手办用固定的 ObserverArmLength 计算观察位置，玩家用滚轮拉近拉远
+	 * 第三人称相机时手办画面保持不变。开启时手办视角跟随实际臂长变化。
+	 */
+	UPROPERTY(EditAnywhere, Category = “场景缩略图|坐标映射”)
+	bool bFollowCameraZoom = false;
+
+	/**
+	 * 手办使用的固定观察臂长（厘米），只在 bFollowCameraZoom 关闭时使用。
+	 *
+	 * 它决定”观察者站在离枢轴多远的地方透过手办看建筑”。默认 420，与
+	 * DreamCharacter 的初始 SpringArm 长度一致。玩家用滚轮改实际相机臂长时，
+	 * 手办仍使用这个固定值，因此画面不会跟着推近。
+	 * 如果想调整手办的取景角度（比如建筑偏离画面中心），改这个值而不是实际臂长。
+	 */
+	UPROPERTY(EditAnywhere, Category = “场景缩略图|坐标映射”,
+		meta = (ClampMin = “50”, UIMin = “50”, EditCondition = “!bFollowCameraZoom”, EditConditionHides))
+	float ObserverArmLength = 420.0f;
 
 	/**
 	 * 捕获场景的参考坐标系到真实世界的变换。
@@ -167,13 +177,12 @@ public:
 	/**
 	 * 未跟随玩家相机时，是否让固定取景的捕获相机朝向锚点位置。
 	 *
-	 * 跟随玩家相机时不读取此选项：固定轨道模式本身就看向锚点，
-	 * 等比映射模式沿用观察相机的旋转。
+	 * 跟随玩家相机时不读取此选项：窗口映射的捕获相机本身就看向锚点。
 	 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|相机锚点")
 	bool bAimCaptureCameraAtOrbitAnchor = true;
 
-	/** 是否让 SceneCapture 跟随第三人称相机观察手办的视角；映射方式见 bUseFixedCaptureOrbit。 */
+	/** 是否让 SceneCapture 跟随第三人称相机观察手办的视角；映射方式见 MapObserverWindowToCaptureWorld。 */
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|坐标映射")
 	bool bFollowPlayerCamera = true;
 
@@ -285,38 +294,37 @@ public:
 	void SetPresentationEnabled(bool bEnabled);
 
 	/**
-	 * 固定半径轨道映射：捕获相机位于锚点周围的球面上，看向锚点。
+	 * 严格窗口映射：把观察者透过面片看到的画面，还原成被捕获真实场景里的一台相机。
 	 *
-	 * 这是跟随玩家相机的默认数学：
-	 * - 观察方向：默认取观察相机的前方向；bAlongLineOfSightToFrame 为 true 时取
-	 *   “观察相机 -> 面片中心”的视线。方向先变换到手办坐标系，再变换到捕获场景参考系；
-	 * - 位置：锚点 − 观察方向 × OrbitRadius。距离固定，观察相机前后移动不改变景别；
-	 * - 上方向：观察相机的上方向投影到垂直于观察方向的平面，与 FaceCamera 面片的
-	 *   上方向计算方式一致，保证 RT 画面和面片的上下对齐。
+	 * 面片中心对应锚点，面片本身是被缩放后的成像平面。要让 RT 的四角正好落在面片的
+	 * 四角上（这是“透过窗口看”成立的前提），三条必须同时满足：
+	 * - 观察方向 dir = normalize(面片中心 − 观察者位置)。相机光轴穿过面片中心，
+	 *   因此锚点落在画面正中。注意它不是观察者前方向——第三人称相机的前方向穿过角色，
+	 *   并不穿过面片；
+	 * - 取景距离 = 观察者到面片的距离 / MiniatureSceneScale。捕获相机位于
+	 *   锚点 − dir × 取景距离，即锚点背后与观察者对称的那一侧；
+	 * - 视场角 = 面片在观察者眼中的张角，见 ComputeWindowFieldOfView。
 	 *
-	 * MiniatureFrameWorldTransform 的位置应为面片中心，旋转为手办坐标系朝向
-	 * （由 ResolveDisplayPlaneWorldTransform 提供），而不是组件原点。
+	 * 上方向取观察者的上方向并正交化到垂直于 dir，与 FaceCamera 面片的竖直方向一致。
+	 * MiniatureFrameWorldTransform 的位置应为面片中心（由 ResolveDisplayPlaneWorldTransform
+	 * 提供）；旋转不参与计算。
 	 */
 	UFUNCTION(BlueprintPure, Category = "场景缩略图|坐标映射")
-	static FTransform MapObserverOrbitToCaptureWorld(
-		const FTransform& ObserverWorldTransform,
-		const FTransform& MiniatureFrameWorldTransform,
-		const FTransform& CapturedSceneReferenceWorldTransform,
-		float OrbitRadius,
-		bool bAlongLineOfSightToFrame = false);
-
-	/**
-	 * 等比映射：观察相机相对面片的完整偏移除以手办比例，还原到捕获场景，旋转沿用观察相机。
-	 *
-	 * 只在 bUseFixedCaptureOrbit 关闭时使用。取景距离随观察相机到面片的实际距离变化。
-	 * MiniatureFrameWorldTransform 的约定与 MapObserverOrbitToCaptureWorld 相同。
-	 */
-	UFUNCTION(BlueprintPure, Category = "场景缩略图|坐标映射")
-	static FTransform MapObserverCameraToCaptureWorld(
+	static FTransform MapObserverWindowToCaptureWorld(
 		const FTransform& ObserverWorldTransform,
 		const FTransform& MiniatureFrameWorldTransform,
 		const FTransform& CapturedSceneReferenceWorldTransform,
 		float InMiniatureSceneScale);
+
+	/**
+	 * 严格窗口对应的水平视场角：面片在观察者眼中的张角。
+	 *
+	 * 面片宽度 W、眼睛到面片距离 d 时为 2·atan((W/2) / d)。取这个值，RT 的整幅画面
+	 * 才恰好覆盖“顺着面片看过去”的那一束角度，面片边缘对应画面边缘。
+	 * 距离过小时被限制在 ToolMaxFOV，避免取景器崩成极广角。
+	 */
+	UFUNCTION(BlueprintPure, Category = "场景缩略图|坐标映射")
+	static float ComputeWindowFieldOfView(float DisplayWorldWidth, float ObserverDistance);
 
 	/** 返回当前输出纹理，供后续门户材质或其他表现组件复用。 */
 	UFUNCTION(BlueprintPure, Category = "场景缩略图")

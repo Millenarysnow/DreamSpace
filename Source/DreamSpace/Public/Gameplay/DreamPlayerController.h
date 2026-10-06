@@ -37,8 +37,22 @@ private:
 	UPROPERTY(EditAnywhere, Category = "交互")
 	TEnumAsByte<ECollisionChannel> InteractTraceChannel = ECC_Visibility;
 
+	/** 滚轮每一档改变 SpringArm 长度的量（厘米）；负值反转滚轮方向。 */
+	UPROPERTY(EditAnywhere, Category = "相机")
+	float CameraZoomStep = 50.0f;
+
+	/** SpringArm 允许的最小长度（厘米），防止滚轮拉得太近。 */
+	UPROPERTY(EditAnywhere, Category = "相机", meta = (ClampMin = "50", UIMin = "50"))
+	float MinCameraArmLength = 150.0f;
+
+	/** SpringArm 允许的最大长度（厘米），防止滚轮拉得太远。 */
+	UPROPERTY(EditAnywhere, Category = "相机", meta = (ClampMin = "100", UIMin = "100"))
+	float MaxCameraArmLength = 800.0f;
+
+private:
 	void Move(const FInputActionValue& Value);
 	void Look(const FInputActionValue& Value);
+	void ZoomCamera(const FInputActionValue& Value);
 	void StartJump();
 	void EndJump();
 	/** E 键触发：对视线命中的 Actor 调用其身上所有可交互组件。 */

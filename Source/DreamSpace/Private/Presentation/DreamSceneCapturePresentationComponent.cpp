@@ -32,25 +32,20 @@ static FAutoConsoleVariableRef CVarDreamSceneCaptureDebugDraw(
 namespace
 {
 	/**
-	 * 捕获视线与面片法线共用的观察方向（世界空间，从观察者指向手办）。
+	 * 窗口模式使用的观察视线（世界空间，从观察者指向面片中心）。
 	 *
-	 * 捕获相机沿这个方向看锚点，面片也必须沿这个方向的反方向朝外；两者只要
-	 * 用了不同的方向，画面内容和面片朝向就会互相错开，看起来像额外倾斜。
-	 * - bAlongLineOfSight（默认）：取“观察者 -> 面片中心”的视线，
-	 *   dir = normalize(面片位置 − 观察者位置)。这是真实手办的取景方式，面片严格
-	 *   垂直于视线，不会有透视压缩；观察者位置取 SpringArm 未经碰撞缩短的理想臂位置，
-	 *   因此镜头被挤近不会改变这个方向；
-	 * - 否则取观察相机前方向：转动量与鼠标绕转 1:1 对应，但与面片之间会差一个
-	 *   随面片偏移和臂长变化的夹角。
+	 * 第三人称相机的前方向穿过角色，并不穿过面片；而面片中心对应锚点，
+	 * “观察者从哪个角度看这个建筑”就是这条视线。用相机前方向会让画面相对
+	 * 面片偏转一个随面片挂点和臂长变化的夹角。观察位置取 SpringArm 未经碰撞
+	 * 缩短的理想臂位置，因此镜头被挤近不会改变这个方向。
 	 */
 	FVector ResolveObserverViewDirection(
-		const FTransform& ObserverWorldTransform, const FVector& FrameLocation, bool bAlongLineOfSight)
+		const FTransform& ObserverWorldTransform, const FVector& FrameLocation)
 	{
-		const FVector Forward = ObserverWorldTransform.GetRotation().GetForwardVector();
-		if (!bAlongLineOfSight)
-			return Forward;
 		const FVector LineOfSight = (FrameLocation - ObserverWorldTransform.GetLocation()).GetSafeNormal();
-		return LineOfSight.IsNearlyZero() ? Forward : LineOfSight;
+		return LineOfSight.IsNearlyZero()
+			? ObserverWorldTransform.GetRotation().GetForwardVector()
+			: LineOfSight;
 	}
 }
 
@@ -259,65 +254,46 @@ void UDreamSceneCapturePresentationComponent::CreatePresentationResources()
 	DisplayMesh->RegisterComponent();
 }
 
-FTransform UDreamSceneCapturePresentationComponent::MapObserverOrbitToCaptureWorld(
-	const FTransform& ObserverWorldTransform,
-	const FTransform& MiniatureFrameWorldTransform,
-	const FTransform& CapturedSceneReferenceWorldTransform,
-	float OrbitRadius,
-	bool bAlongLineOfSightToFrame)
-{
-	// 两个参考系都只用位置：取景距离由 OrbitRadius 显式给出，
-	// 朝向在下面单独说明，不允许组件或锚点自带的缩放再次改变捕获距离。
-	const FVector FrameLocation = MiniatureFrameWorldTransform.GetLocation();
-	const FVector AnchorLocation = CapturedSceneReferenceWorldTransform.GetLocation();
-
-	// 默认按“眼睛 -> 面片中心”的视线取景：捕获相机放在锚点沿视线方向的反侧，
-	// 玩家绕角色转到哪一侧、俯到什么角度，就从同一侧、同一俯角看建筑。
-	// 这条视线里的观察位置来自理想臂长，所以画面不会随镜头被挤近而改变。
-	// 关掉该选项时退化为相机前方向（转动 1:1，但面片会与视线差一个夹角）。
-	// UpdateDisplayFacing 使用同一个函数计算面片法线，保证画面与面片朝向一致。
-	const FVector ViewDirection = ResolveObserverViewDirection(
-		ObserverWorldTransform, FrameLocation, bAlongLineOfSightToFrame);
-
-	// 上方向取观察相机的上方向，与 FaceCamera 面片的计算方式一致，
-	// 这样 RT 画面的“上”和面片在主视口中的“上”是同一个方向。
-	const FVector Up = ObserverWorldTransform.GetRotation().GetUpVector();
-
-	// 视线与上方向都不经过手办坐标系或锚点的旋转。
-	//
-	// 手办坐标系（面片组件）自带的旋转描述的是“面片朝向哪一边”，例如原型角色为了让
-	// 面片朝外设了 180°（见 DreamCharacter 的 SetRelativeRotation）。那是显示层的朝向，
-	// 不是被捕获场景的朝向。一旦把它乘进捕获方向，方位角会被整体翻转 180°，
-	// 捕获相机就跑到玩家相机的另一侧——玩家转到手办连线的正后方时最明显。
-	// 锚点旋转同理：它只描述参考系朝向，不该改变“相机在玩家的哪一侧”这个
-	// 世界空间的事实。因此两者都只提供原点，不参与方向计算。
-	//
-	// 捕获相机站在锚点背后、沿视线看向锚点：位置 = 锚点 − 视线 × 半径。
-	// MakeFromXZ 保持 X（视线）不变，只把上方向正交化到垂直于视线的平面上。
-	const float Radius = FMath::Max(OrbitRadius, 0.0f);
-	const FQuat CaptureRotation = FRotationMatrix::MakeFromXZ(ViewDirection, Up).ToQuat();
-	return FTransform(CaptureRotation, AnchorLocation - ViewDirection * Radius);
-}
-
-FTransform UDreamSceneCapturePresentationComponent::MapObserverCameraToCaptureWorld(
+FTransform UDreamSceneCapturePresentationComponent::MapObserverWindowToCaptureWorld(
 	const FTransform& ObserverWorldTransform,
 	const FTransform& MiniatureFrameWorldTransform,
 	const FTransform& CapturedSceneReferenceWorldTransform,
 	float InMiniatureSceneScale)
 {
-	// 与固定轨道同一套约定：手办坐标系和锚点都只提供**位置**，两者的旋转都不参与映射。
+	// 手办坐标系和锚点都只提供**位置**，两者的旋转都不参与映射。
 	//
 	// 手办组件的旋转属于显示层（原型角色为了让面片朝外设了 180°，见 DreamCharacter 的
 	// SetRelativeRotation），锚点旋转属于取景参考系；只要把它们乘进方向，方位角就会
-	// 整体翻转，捕获相机跑到玩家相机的另一侧。被捕获的场景始终与世界轴对齐，
-	// 玩家的观察位姿原样缩放即可得到正确的视差。
-	const float Scale = FMath::Max(FMath::Abs(InMiniatureSceneScale), KINDA_SMALL_NUMBER);
-	const FVector ObserverOffset =
-		ObserverWorldTransform.GetLocation() - MiniatureFrameWorldTransform.GetLocation();
+	// 整体翻转，捕获相机跑到玩家相机的另一侧。被捕获的场景始终与世界轴对齐。
+	const FVector FrameLocation = MiniatureFrameWorldTransform.GetLocation();
+	const FVector AnchorLocation = CapturedSceneReferenceWorldTransform.GetLocation();
+	const FVector ObserverLocation = ObserverWorldTransform.GetLocation();
 
-	return FTransform(
-		ObserverWorldTransform.GetRotation(),
-		CapturedSceneReferenceWorldTransform.GetLocation() + ObserverOffset / Scale);
+	// 光轴必须穿过面片中心，这样 RT 的四角才落在面片的四角上、锚点落在画面正中。
+	// 用观察者前方向代替会让画面相对面片偏转，第三人称相机的前方向穿过的是角色。
+	const FVector ViewDirection = ResolveObserverViewDirection(ObserverWorldTransform, FrameLocation);
+	const FVector Up = ObserverWorldTransform.GetRotation().GetUpVector();
+
+	// 取景距离 = 观察者到面片的距离 ÷ 手办比例。眼睛离面片越远，等效的真实相机
+	// 就退得越远；碰撞推近用的是理想臂长，所以这个距离在贴墙时不会抖动。
+	const float Scale = FMath::Max(FMath::Abs(InMiniatureSceneScale), KINDA_SMALL_NUMBER);
+	const float WindowDistance = FVector::Distance(ObserverLocation, FrameLocation) / Scale;
+
+	// 捕获相机位于锚点背后与观察者对称的一侧，沿视线看向锚点。
+	const FQuat CaptureRotation = FRotationMatrix::MakeFromXZ(ViewDirection, Up).ToQuat();
+	return FTransform(CaptureRotation, AnchorLocation - ViewDirection * WindowDistance);
+}
+
+float UDreamSceneCapturePresentationComponent::ComputeWindowFieldOfView(
+	float DisplayWorldWidth, float ObserverDistance)
+{
+	// 面片在观察者眼中的张角：2·atan((宽/2) / 距离)。RT 使用同一宽高比，
+	// 因此水平与竖直张角相同，一个值即可同时满足两者。
+	// 距离过小或被手动配置成负数时，用下限避免取景器崩成极广角。
+	const float HalfWidth = FMath::Max(DisplayWorldWidth, 0.01f) * 0.5f;
+	const float Distance = FMath::Max(ObserverDistance, KINDA_SMALL_NUMBER);
+	return FMath::Clamp(
+		FMath::RadiansToDegrees(2.0f * FMath::Atan2(HalfWidth, Distance)), 1.0f, 170.0f);
 }
 
 void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
@@ -428,33 +404,32 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 		const FTransform SceneReference = ResolveCapturedSceneReference();
 		USceneCaptureComponent2D* CaptureComponent = CaptureActor->GetCaptureComponent2D();
 
-		if (bUseFixedCaptureOrbit)
-		{
-			// 固定半径轨道：捕获相机绕锚点转动、看向锚点，距离恒为 CaptureDistance。
-			// 捕获相机总是正对锚点，画面中心就是面片中心，因此使用组件自己的投影参数，
-			// 不复制主相机的 FOV（主相机的 FOV 描述的是整个屏幕，而不是手办这块小窗口）。
-			CaptureActor->SetActorTransform(MapObserverOrbitToCaptureWorld(
-				ObserverWorld, MiniatureFrame, SceneReference, CaptureDistance,
-				bOrbitAlongLineOfSightToDisplay));
-			if (CaptureComponent)
-			{
-				CaptureComponent->ProjectionType = ProjectionType;
-				CaptureComponent->FOVAngle = CaptureFOV;
-			}
-			return;
-		}
-
-		// 等比映射：观察相机相对面片的完整位姿按 MiniatureSceneScale 还原到被捕获场景，
-		// 沿用主相机的旋转、投影和 FOV，得到与真实手办一致的视差。
-		CaptureActor->SetActorTransform(MapObserverCameraToCaptureWorld(
+		// 严格窗口映射：捕获相机的位置、朝向和视场角三者必须同时与面片对齐，
+		// 否则画面会相对面片偏转或缩放，“透过手办看世界”就不成立。
+		CaptureActor->SetActorTransform(MapObserverWindowToCaptureWorld(
 			ObserverWorld, MiniatureFrame, SceneReference, MiniatureSceneScale));
 		if (CaptureComponent)
 		{
-			CaptureComponent->ProjectionType = PlayerPOV.ProjectionMode;
-			if (PlayerPOV.ProjectionMode == ECameraProjectionMode::Perspective)
-				CaptureComponent->FOVAngle = PlayerPOV.FOV;
+			CaptureComponent->ProjectionType = ProjectionType;
+			if (ProjectionType == ECameraProjectionMode::Perspective)
+			{
+				if (bMatchCaptureFOVToDisplay)
+				{
+					// 视场角 = 面片在观察者眼中的张角。这样 RT 的整幅画面恰好覆盖
+					// 顺着面片看过去的那一束角度，面片边缘对应画面边缘。
+					const float ObserverDistance = FVector::Distance(
+						ObserverWorld.GetLocation(), MiniatureFrame.GetLocation());
+					CaptureComponent->FOVAngle = ComputeWindowFieldOfView(DisplayWorldSize.X, ObserverDistance);
+				}
+				else
+				{
+					CaptureComponent->FOVAngle = CaptureFOV;
+				}
+			}
 			else
-				CaptureComponent->OrthoWidth = PlayerPOV.OrthoWidth;
+			{
+				CaptureComponent->OrthoWidth = DisplayWorldSize.X;
+			}
 		}
 		return;
 	}
@@ -569,12 +544,25 @@ FVector UDreamSceneCapturePresentationComponent::ResolveObserverLocation(const F
 	if (!SpringArm)
 		return POV.Location;
 
-	// UnfixedCameraPosition 是 SpringArm 按 TargetArmLength 算出、尚未因碰撞缩短的
-	// 镜头位置（含相机延迟）。SpringArm 在 TG_PostPhysics 更新，本组件在
-	// TG_PostUpdateWork 读取，因此拿到的是当前帧的值。SpringArm 首次更新前它是
-	// 零向量，此时退回真实相机位置。
-	const FVector UnfixedLocation = SpringArm->GetUnfixedCameraPosition();
-	return UnfixedLocation.IsZero() ? POV.Location : UnfixedLocation;
+	// 手办用固定的 ObserverArmLength 计算观察位置，而不是实时的 TargetArmLength。
+	// 这样玩家用滚轮改实际相机臂长时，手办视角保持不变。
+	// bFollowCameraZoom 开启时才跟随实际臂长。
+	const float ArmLength = bFollowCameraZoom ? SpringArm->TargetArmLength : ObserverArmLength;
+	const FVector SocketOffset = SpringArm->SocketOffset;
+	const FVector TargetOffset = SpringArm->TargetOffset;
+
+	// 复现 SpringArm 的位置计算：枢轴 = ComponentLocation + SocketOffset，
+	// 镜头理想位置 = 枢轴 + TargetOffset - CameraForward × ArmLength。
+	// 这里不用 GetUnfixedCameraPosition()，因为它返回的是 TargetArmLength 那根臂。
+	const FTransform ArmWorld = SpringArm->GetComponentTransform();
+	const FVector PivotWorld = ArmWorld.TransformPosition(SocketOffset);
+	const FQuat ArmRotation = (SpringArm->bUsePawnControlRotation && ViewTarget->GetInstigatorController())
+		? ViewTarget->GetInstigatorController()->GetControlRotation().Quaternion()
+		: ArmWorld.GetRotation();
+	const FVector DesiredLocation = PivotWorld + ArmRotation.RotateVector(TargetOffset - FVector(ArmLength, 0.0f, 0.0f));
+
+	// SpringArm 首次更新前 GetUnfixedCameraPosition 是零向量；这里也做同样的检查。
+	return DesiredLocation.IsZero() ? POV.Location : DesiredLocation;
 }
 
 void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
@@ -662,11 +650,10 @@ void UDreamSceneCapturePresentationComponent::DrawCaptureDebug() const
 	const FVector ObserverLocation = ResolveObserverLocation(POV);
 	const FVector CaptureForward = CaptureWorld.GetRotation().GetForwardVector();
 	const FVector PlaneNormal = DisplayMesh ? DisplayMesh->GetUpVector() : FVector::ZeroVector;
-	// 映射使用的是观察相机的实际朝向：视线模式下捕获相机沿“观察位置 -> 面片中心”
-	// 看过去，其余情况沿观察相机前方向。两者都在世界空间比较，不再绕道手办坐标系。
+	// 映射使用的观察方向：从理想观察位置指向面片中心的视线。世界空间直接比较，
+	// 不绕道手办坐标系。
 	const FVector ObserverForward = ResolveObserverViewDirection(
-		FTransform(POV.Rotation, ObserverLocation), MiniatureFrame.GetLocation(),
-		bOrbitAlongLineOfSightToDisplay);
+		FTransform(POV.Rotation, ObserverLocation), MiniatureFrame.GetLocation());
 
 	// 被捕获场景一侧：锚点（黄）、捕获相机视锥（品红）、捕获视线（品红虚线）。
 	const FVector AnchorLocation = SceneReference.GetLocation();
@@ -678,8 +665,8 @@ void UDreamSceneCapturePresentationComponent::DrawCaptureDebug() const
 	DrawDebugString(World, CaptureWorld.GetLocation() + FVector(0.0f, 0.0f, 80.0f),
 		TEXT("SceneCapture"), nullptr, FColor::Magenta, 0.0f, true);
 
-	// 手办一侧：以面片中心为起点画三根方向线。绿线与红线应当重合，
-	// 蓝线（面片法线）应当与它们正好反向。
+	// 手办一侧：以面片中心为起点画方向线。捕获相机光轴穿过面片中心（锚点），
+	// 所以红线（捕获相机前方向）应与绿线（观察视线）重合，蓝线（面片法线）与它们正好反向。
 	const FVector FrameLocation = MiniatureFrame.GetLocation();
 	constexpr float ArrowLength = 60.0f;
 	DrawDebugDirectionalArrow(World, FrameLocation, FrameLocation + ObserverForward * ArrowLength,
@@ -703,18 +690,23 @@ void UDreamSceneCapturePresentationComponent::DrawCaptureDebug() const
 			return FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(A.GetSafeNormal() | B.GetSafeNormal(), -1.0, 1.0)));
 		};
 		const FRotator CaptureRotator = CaptureWorld.Rotator();
+		const float ObserverDistance = FVector::Distance(ObserverLocation, FrameLocation);
 		const FString Text = FString::Printf(
 			TEXT("[dream.DebugSceneCapture]\n")
 			TEXT("玩家相机  Pitch %.1f  Yaw %.1f   真实臂长 %.0f  理想臂长 %.0f\n")
-			TEXT("捕获相机  Pitch %.1f  Yaw %.1f   到锚点 %.0f  FOV %.1f\n")
-			TEXT("绿(观察视线)-红(捕获相机前方向) 夹角 %.2f°   蓝(面片法线)与 -绿 夹角 %.2f°\n")
+			TEXT("捕获相机  Pitch %.1f  Yaw %.1f   到锚点 %.0f  FOV %.1f (面片张角 %.1f)\n")
+			TEXT("绿(观察视线)-红(捕获光轴) 夹角 %.2f°   蓝(面片法线)与 -绿 夹角 %.2f°\n")
+			TEXT("窗口景别  眼睛到面片 %.0f  ⇒ 覆盖真实范围 ≈ %.0f cm (比例 %.3f)\n")
 			TEXT("位置  捕获 %s  锚点 %s"),
 			POV.Rotation.Pitch, POV.Rotation.Yaw,
-			FVector::Distance(POV.Location, FrameLocation), FVector::Distance(ObserverLocation, FrameLocation),
+			FVector::Distance(POV.Location, FrameLocation), ObserverDistance,
 			CaptureRotator.Pitch, CaptureRotator.Yaw,
 			FVector::Distance(CaptureWorld.GetLocation(), AnchorLocation), CaptureComponent->FOVAngle,
+			ComputeWindowFieldOfView(DisplayWorldSize.X, ObserverDistance),
 			AngleBetween(ObserverForward, CaptureForward),
 			PlaneNormal.IsNearlyZero() ? -1.0 : AngleBetween(PlaneNormal, -ObserverForward),
+			ObserverDistance, DisplayWorldSize.X / FMath::Max(MiniatureSceneScale, KINDA_SMALL_NUMBER),
+			MiniatureSceneScale,
 			*CaptureWorld.GetLocation().ToCompactString(), *AnchorLocation.ToCompactString());
 		GEngine->AddOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()), 0.0f, FColor::Cyan, Text, false);
 	}
