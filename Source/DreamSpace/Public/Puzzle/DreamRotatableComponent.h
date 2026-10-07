@@ -89,6 +89,15 @@ private:
 	UPROPERTY(EditAnywhere, Category = "可转动|转动", meta = (ClampMin = "0.0", UIMin = "0.0"))
 	float RotationDuration = 0.5f;
 
+	/**
+	 * 开启后，运动会检测所属 Actor 上随根一起移动的查询碰撞组件。
+	 * 转动中途碰到阻挡物会沿原路径弹回本次交互的起始姿态；默认关闭以兼容已有机关。
+	 * 网格或碰撞体需要启用 Query 碰撞，并与障碍物互相设置为 Block。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "可转动|碰撞",
+		meta = (AllowPrivateAccess = "true", DisplayName = "运动考虑碰撞"))
+	bool bConsiderCollision = false;
+
 	/** 调试绘制时转轴箭头的长度（厘米）。 */
 	UPROPERTY(EditAnywhere, Category = "调试", meta = (ClampMin = "0.0", UIMin = "0.0"))
 	float DebugAxisDrawLength = 150.0f;
@@ -103,6 +112,13 @@ private:
 	bool bRotating = false;
 	/** 本次转动已经过的时间（秒）。 */
 	float RotationElapsed = 0.0f;
+	/** 正在从首次受阻处回到本次起始姿态；此期间仍视为转动中，新的交互会被忽略。 */
+	bool bReturning = false;
+	/** 前进时最后一个已验证安全的进度，回弹的起点就固定在这里。 */
+	float SafeRotationAlpha = 0.0f;
+	/** 回弹已经过的时间和回弹总时长；总时长随已走过的路程缩放。 */
+	float ReturnElapsed = 0.0f;
+	float ReturnDuration = 0.0f;
 
 	// 以下三个量在触发瞬间快照固定：
 	// 枢轴点在被转 Actor 上时会随 Actor 一起运动，但“绕某轴转动”不会改变该轴上的点和轴方向，
@@ -121,6 +137,15 @@ private:
 
 	/** 取枢轴点局部坐标系中配置轴的世界方向（单位向量）。 */
 	FVector GetRotationAxisWorldDir(const UDreamPivotPointComponent* Pivot) const;
+
+	/** 按本次交互的起点和进度计算世界姿态；前进和回弹共用同一条精确轨迹。 */
+	FTransform GetActorTransformAtAlpha(float Alpha) const;
+
+	/** 沿旋转弧线检查并推进到目标进度；遇阻时停在最后一个安全姿态。 */
+	bool AdvanceWithCollision(float TargetAlpha);
+
+	/** 从当前已通过的角度开始回弹，完成后精确恢复起始姿态。 */
+	void BeginReturn();
 
 	/** 调试开关打开时逐帧绘制当前使用的转轴（品红色双向箭头）。 */
 	void DrawDebugRotationAxis() const;

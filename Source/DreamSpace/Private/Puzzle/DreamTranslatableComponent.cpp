@@ -1,6 +1,7 @@
 #include "DreamTranslatableComponent.h"
 
 #include "DreamPivotPointComponent.h"
+#include "DreamInteractionCollision.h"
 #include "DreamPuzzleDebug.h"
 #include "DreamSpace.h"
 #include "DrawDebugHelpers.h"
@@ -53,6 +54,29 @@ void UDreamTranslatableComponent::TickComponent(
 	if (!Owner)
 	{
 		bTranslating = false;
+		bReturning = false;
+		return;
+	}
+
+	if (bReturning)
+	{
+		ReturnElapsed += DeltaTime;
+		const float RawReturnAlpha = ReturnDuration <= 0.0f
+			? 1.0f : FMath::Clamp(ReturnElapsed / ReturnDuration, 0.0f, 1.0f);
+		const float Ease = RawReturnAlpha * RawReturnAlpha * (3.0f - 2.0f * RawReturnAlpha);
+		// 回程只经过前进时已经验证安全的路段，因此直接沿原直线插值。
+		Owner->SetActorLocation(FMath::Lerp(ReturnStartLocation, StartActorLocation, Ease),
+			false, nullptr, ETeleportType::None);
+		CurrentTranslation = FMath::Lerp(ReturnStartTranslation, StartTranslation, Ease);
+		if (RawReturnAlpha >= 1.0f)
+		{
+			Owner->SetActorLocation(StartActorLocation, false, nullptr, ETeleportType::None);
+			CurrentTranslation = StartTranslation;
+			TranslationDirection = StartTranslationDirection;
+			TranslationElapsed = 0.0f;
+			bReturning = false;
+			bTranslating = false;
+		}
 		return;
 	}
 
@@ -66,10 +90,28 @@ void UDreamTranslatableComponent::TickComponent(
 	// SmoothStep 在起点和终点的速度都为 0，比线性插值更适合抽屉、滑块等机关。
 	const float SmoothedAlpha = RawAlpha * RawAlpha * (3.0f - 2.0f * RawAlpha);
 	const FVector NewLocation = FMath::Lerp(StartActorLocation, TargetActorLocation, SmoothedAlpha);
-	CurrentTranslation = FMath::Lerp(StartTranslation, TargetTranslation, SmoothedAlpha);
-
-	// 只写入位置，不覆盖 Actor 在动画期间可能由其他系统维护的旋转和缩放。
-	Owner->SetActorLocation(NewLocation, false, nullptr, ETeleportType::None);
+	if (bConsiderCollision)
+	{
+		// 碰撞查询逐个覆盖根与附属碰撞体，同时保留 Actor 当前旋转和缩放。
+		// 命中时先走到接触前的安全位置，再把它作为回弹起点。
+		const FTransform Candidate(Owner->GetActorQuat(), NewLocation, Owner->GetActorScale3D());
+		const float SafeFraction = DreamInteractionCollision::FindSafeMoveFraction(Owner, Candidate);
+		const FVector ActualLocation = FMath::Lerp(Owner->GetActorLocation(), NewLocation, SafeFraction);
+		Owner->SetActorLocation(ActualLocation, false, nullptr, ETeleportType::None);
+		CurrentTranslation = StartTranslation
+			+ FVector::DotProduct(ActualLocation - StartActorLocation, ActiveAxisWorld);
+		if (SafeFraction < 1.0f)
+		{
+			BeginReturn();
+			return;
+		}
+	}
+	else
+	{
+		// 兼容旧行为：不检测碰撞，逻辑坐标直接跟随插值进度。
+		Owner->SetActorLocation(NewLocation, false, nullptr, ETeleportType::None);
+		CurrentTranslation = FMath::Lerp(StartTranslation, TargetTranslation, SmoothedAlpha);
+	}
 
 	if (RawAlpha >= 1.0f)
 		CompleteTranslation();
@@ -129,6 +171,7 @@ void UDreamTranslatableComponent::TriggerTranslation()
 		return;
 	}
 
+	StartTranslationDirection = TranslationDirection;
 	TargetTranslation = CalculateNextTranslation();
 	const float TranslationDelta = TargetTranslation - CurrentTranslation;
 	if (FMath::IsNearlyZero(TranslationDelta))
@@ -149,13 +192,47 @@ void UDreamTranslatableComponent::TriggerTranslation()
 
 	if (TranslationDuration <= 0.0f)
 	{
-		// 0 秒模式不进入 Tick，统一由收束函数写入目标位置并更新逻辑状态。
+		// 瞬时模式仍检查从起点到目标的整段路径；受阻时没有动画时间，直接复位。
+		if (bConsiderCollision)
+		{
+			const FTransform Candidate(Owner->GetActorQuat(), TargetActorLocation, Owner->GetActorScale3D());
+			if (DreamInteractionCollision::FindSafeMoveFraction(Owner, Candidate) < 1.0f)
+			{
+				TranslationDirection = StartTranslationDirection;
+				TargetTranslation = StartTranslation;
+				return;
+			}
+		}
 		CompleteTranslation();
 		return;
 	}
 
 	TranslationElapsed = 0.0f;
+	bReturning = false;
 	bTranslating = true;
+}
+
+void UDreamTranslatableComponent::BeginReturn()
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+		return;
+
+	ReturnStartLocation = Owner->GetActorLocation();
+	ReturnStartTranslation = CurrentTranslation;
+	const float ForwardFraction = FVector::Distance(StartActorLocation, ReturnStartLocation)
+		/ FMath::Max(FVector::Distance(StartActorLocation, TargetActorLocation), KINDA_SMALL_NUMBER);
+	if (ForwardFraction <= KINDA_SMALL_NUMBER)
+	{
+		// 起点就被挡住时无需播放空回弹，直接恢复整次交互的状态。
+		CurrentTranslation = StartTranslation;
+		TranslationDirection = StartTranslationDirection;
+		bTranslating = false;
+		return;
+	}
+	ReturnElapsed = 0.0f;
+	ReturnDuration = FMath::Max(0.08f, TranslationDuration * ForwardFraction);
+	bReturning = true;
 }
 
 UDreamPivotPointComponent* UDreamTranslatableComponent::ResolvePivot() const
@@ -291,6 +368,7 @@ void UDreamTranslatableComponent::CompleteTranslation()
 
 	CurrentTranslation = TargetTranslation;
 	TranslationElapsed = 0.0f;
+	bReturning = false;
 	bTranslating = false;
 }
 

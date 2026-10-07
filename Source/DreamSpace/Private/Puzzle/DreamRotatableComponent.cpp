@@ -1,5 +1,6 @@
 #include "DreamRotatableComponent.h"
 #include "DreamPivotPointComponent.h"
+#include "DreamInteractionCollision.h"
 #include "DreamPuzzleDebug.h"
 #include "DreamSpace.h"
 #include "DrawDebugHelpers.h"
@@ -44,6 +45,26 @@ void UDreamRotatableComponent::TickComponent(
 	if (!Owner)
 	{
 		bRotating = false;
+		bReturning = false;
+		return;
+	}
+
+	if (bReturning)
+	{
+		ReturnElapsed += DeltaTime;
+		const float RawReturnAlpha = ReturnDuration <= 0.0f
+			? 1.0f : FMath::Clamp(ReturnElapsed / ReturnDuration, 0.0f, 1.0f);
+		const float Ease = RawReturnAlpha * RawReturnAlpha * (3.0f - 2.0f * RawReturnAlpha);
+		const FTransform ReturnTransform = GetActorTransformAtAlpha(SafeRotationAlpha * (1.0f - Ease));
+		Owner->SetActorLocationAndRotation(ReturnTransform.GetLocation(), ReturnTransform.GetRotation(),
+			false, nullptr, ETeleportType::None);
+		if (RawReturnAlpha >= 1.0f)
+		{
+			Owner->SetActorLocationAndRotation(StartActorTransform.GetLocation(),
+				StartActorTransform.GetRotation(), false, nullptr, ETeleportType::None);
+			bReturning = false;
+			bRotating = false;
+		}
 		return;
 	}
 
@@ -54,14 +75,20 @@ void UDreamRotatableComponent::TickComponent(
 	// SmoothStep 缓动：两端速度为 0，机关转动的手感更稳，也避免到位瞬间的顿挫。
 	const float Alpha = RawAlpha * RawAlpha * (3.0f - 2.0f * RawAlpha);
 
-	// 在“恒等 -> 完整步进”之间球面插值出本帧的增量旋转。
-	const FQuat PartialQuat = FQuat::Slerp(FQuat::Identity, FullStepQuat, Alpha);
-
-	// 姿态 = 绕枢轴点公转（位置绕轴旋转）+ 自转（朝向乘上同一个增量旋转）。
-	const FVector StartLocation = StartActorTransform.GetLocation();
-	const FVector NewLocation = PivotWorldLocation + PartialQuat * (StartLocation - PivotWorldLocation);
-	const FQuat NewRotation = PartialQuat * StartActorTransform.GetRotation();
-	Owner->SetActorLocationAndRotation(NewLocation, NewRotation, false, nullptr, ETeleportType::None);
+	if (bConsiderCollision)
+	{
+		if (!AdvanceWithCollision(Alpha))
+		{
+			BeginReturn();
+			return;
+		}
+	}
+	else
+	{
+		const FTransform NextTransform = GetActorTransformAtAlpha(Alpha);
+		Owner->SetActorLocationAndRotation(NextTransform.GetLocation(), NextTransform.GetRotation(),
+			false, nullptr, ETeleportType::None);
+	}
 
 	if (RawAlpha >= 1.0f)
 		bRotating = false;
@@ -108,15 +135,81 @@ void UDreamRotatableComponent::TriggerRotation()
 
 	if (RotationDuration <= 0.0f)
 	{
-		// 时长为 0：瞬间到位，不进入 Tick 插值流程。
-		const FVector StartLocation = StartActorTransform.GetLocation();
-		Owner->SetActorLocationAndRotation(PivotWorldLocation + FullStepQuat * (StartLocation - PivotWorldLocation),
-			FullStepQuat * StartActorTransform.GetRotation(), false, nullptr, ETeleportType::None);
+		// 0 秒仍要检查整段旋转弧线；受阻时没有动画时间，立即精确回到原位。
+		SafeRotationAlpha = 0.0f;
+		if (bConsiderCollision && !AdvanceWithCollision(1.0f))
+		{
+			Owner->SetActorLocationAndRotation(StartActorTransform.GetLocation(),
+				StartActorTransform.GetRotation(), false, nullptr, ETeleportType::None);
+			return;
+		}
+		if (!bConsiderCollision)
+		{
+			const FTransform TargetTransform = GetActorTransformAtAlpha(1.0f);
+			Owner->SetActorLocationAndRotation(TargetTransform.GetLocation(), TargetTransform.GetRotation(),
+				false, nullptr, ETeleportType::None);
+		}
 		return;
 	}
 
 	RotationElapsed = 0.0f;
+	SafeRotationAlpha = 0.0f;
+	bReturning = false;
 	bRotating = true;
+}
+
+FTransform UDreamRotatableComponent::GetActorTransformAtAlpha(float Alpha) const
+{
+	// 使用触发瞬间固定的枢轴、起始姿态与完整步进四元数。
+	// 同一个 Alpha 在前进和回弹时得到完全相同的姿态，不会产生累计漂移。
+	const FQuat PartialQuat = FQuat::Slerp(FQuat::Identity, FullStepQuat, Alpha);
+	const FVector NewLocation = PivotWorldLocation
+		+ PartialQuat * (StartActorTransform.GetLocation() - PivotWorldLocation);
+	return FTransform(PartialQuat * StartActorTransform.GetRotation(), NewLocation,
+		StartActorTransform.GetScale3D());
+}
+
+bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha)
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+		return false;
+
+	// UE 不扫旋转体积：把本帧需前进的弧线切成小段。除最大 2° 外，
+	// 还限制最远碰撞点每段的弧长到 2 cm，门板很长时也不会一步跨过薄障碍。
+	const float FullAngle = 2.0f * FMath::Acos(FMath::Clamp(FMath::Abs(FullStepQuat.W), 0.0f, 1.0f));
+	const float Radius = DreamInteractionCollision::GetMaxCollisionRadius(Owner, PivotWorldLocation);
+	const float MaxAlphaStep = FMath::Min(1.0f,
+		FMath::Min(FMath::DegreesToRadians(2.0f) / FMath::Max(FullAngle, KINDA_SMALL_NUMBER),
+			2.0f / FMath::Max(FullAngle * Radius, KINDA_SMALL_NUMBER)));
+	const int32 Steps = FMath::Max(1, FMath::CeilToInt((TargetAlpha - SafeRotationAlpha) / MaxAlphaStep));
+	const float FromAlpha = SafeRotationAlpha;
+
+	for (int32 Index = 1; Index <= Steps; ++Index)
+	{
+		const float NextAlpha = FMath::Lerp(FromAlpha, TargetAlpha, static_cast<float>(Index) / Steps);
+		const FTransform NextTransform = GetActorTransformAtAlpha(NextAlpha);
+		if (DreamInteractionCollision::FindSafeMoveFraction(Owner, NextTransform) < 1.0f)
+			return false;
+		Owner->SetActorLocationAndRotation(NextTransform.GetLocation(), NextTransform.GetRotation(),
+			false, nullptr, ETeleportType::None);
+		SafeRotationAlpha = NextAlpha;
+	}
+	return true;
+}
+
+void UDreamRotatableComponent::BeginReturn()
+{
+	// 受阻后整次交互失败；回弹时间按已走过的进度缩放，碰得越早退得越快。
+	// 无前进距离时直接结束，避免在原地等待一个空动画。
+	if (SafeRotationAlpha <= KINDA_SMALL_NUMBER)
+	{
+		bRotating = false;
+		return;
+	}
+	ReturnElapsed = 0.0f;
+	ReturnDuration = FMath::Max(0.08f, RotationDuration * SafeRotationAlpha);
+	bReturning = true;
 }
 
 UDreamPivotPointComponent* UDreamRotatableComponent::ResolvePivot() const

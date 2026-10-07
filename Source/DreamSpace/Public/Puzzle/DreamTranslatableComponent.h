@@ -127,6 +127,15 @@ private:
 	float TranslationDuration = 0.5f;
 
 	/**
+	 * 开启后，平移会检查所属 Actor 上随根一起移动的查询碰撞组件。
+	 * 任意一段路程受阻，本次交互就失败并弹回起点；默认关闭以兼容已有机关。
+	 * 网格或碰撞体需要启用 Query 碰撞，并与障碍物互相设置为 Block。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "可平移|碰撞",
+		meta = (AllowPrivateAccess = "true", DisplayName = "运动考虑碰撞"))
+	bool bConsiderCollision = false;
+
+	/**
 	 * 到达正向或负向端点后，下一次交互是否改为向另一端移动。
 	 * 关闭后会一直保持当前方向；到达该方向端点后，后续触发不会产生位移。
 	 */
@@ -177,6 +186,16 @@ private:
 	/** 本次平移动画已经过的时间（秒）。 */
 	float TranslationElapsed = 0.0f;
 
+	/** 受阻后正沿原路径回弹；此时仍处于平移状态，不能接收下一次交互。 */
+	bool bReturning = false;
+	/** 回弹的起始世界位置、逻辑坐标与已过时间。 */
+	FVector ReturnStartLocation = FVector::ZeroVector;
+	float ReturnStartTranslation = 0.0f;
+	float ReturnElapsed = 0.0f;
+	float ReturnDuration = 0.0f;
+	/** 下次运动方向在计算目标时可能被端点逻辑改写，失败时必须回滚这个决定。 */
+	float StartTranslationDirection = 1.0f;
+
 	/** 本次动画触发瞬间 Actor 的世界位置。 */
 	FVector StartActorLocation = FVector::ZeroVector;
 
@@ -205,6 +224,9 @@ private:
 
 	/** 将运行状态精确收束到本次目标，避免浮点插值留下细小误差。 */
 	void CompleteTranslation();
+
+	/** 从受阻处开始返回本次起点，并恢复逻辑坐标与运动方向。 */
+	void BeginReturn();
 
 	/** 调试开关打开时，逐帧绘制正负范围、端点、零点和 Actor 当前所在位置。 */
 	void DrawDebugTranslationRange() const;
