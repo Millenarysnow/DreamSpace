@@ -349,6 +349,13 @@ public:
 	void GetCaptureHiddenActors(TArray<AActor*>& OutActors) const;
 
 	/**
+	 * 返回手办取景实际使用的观察姿态，供取景、面片和调试共用。
+	 * 忽略碰撞时，越肩相机提供无碰撞的枢轴/旋转/完整肩位；普通 SpringArm 使用原生偏移约定。
+	 * 未忽略碰撞或找不到摇臂时使用传入的真实视口姿态。此接口不创建资源、不改变玩法状态。
+	 */
+	FTransform GetObserverTransform(const FMinimalViewInfo& PlayerPOV) const;
+
+	/**
 	 * 无碰撞平面的解析求交：输出默认 Plane UV0 布局下的纹理坐标。
 	 * 纯几何函数便于覆盖越界、背面、图像旋转、缩放和实际相机偏移的回归测试。
 	 * 180° 修正由显示面的真实变换体现，调用者不可再次翻转 UV。
@@ -387,7 +394,6 @@ private:
 	bool GetPlayerCameraPOV(FMinimalViewInfo& OutPOV) const;
 	FTransform ResolveCapturedSceneReference() const;
 	FTransform ResolveDisplayPlaneWorldTransform() const;
-	FVector ResolveObserverLocation(const FMinimalViewInfo& POV) const;
 	/** dream.DebugSceneCapture 1 时每帧绘制捕获相机、锚点与面片方向，只用于调试。 */
 	void DrawCaptureDebug() const;
 };

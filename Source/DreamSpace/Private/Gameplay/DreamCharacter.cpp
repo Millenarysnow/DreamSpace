@@ -6,6 +6,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "DreamPlayerController.h"
 #include "DreamSceneCapturePresentationComponent.h"
+#include "DreamShoulderCameraComponent.h"
 #include "EnhancedInputComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
@@ -68,11 +69,11 @@ ADreamCharacter::ADreamCharacter()
 		}
 	}
 
-	// 官方模板的相机轨道。保留项目原先的 420 cm 臂长和 60 cm 高度，
-	// 因为手办窗口的 ObserverArmLength 默认也以 420 cm 为对应观察距离。
-	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	// 越肩相机保持原有 CameraBoom 子对象名称和 SpringArm 接口，滚轮和旧资产仍能找到它。
+	// 理想距离 210 cm、右肩偏移 45 cm；人物按移动方向转身，不强制朝相机方向横移/倒退。
+	// 枢轴挂胶囊而非动画骨骼，默认沿角色局部向上 60 cm，重力翻转时也随胶囊一起转动。
+	CameraBoom = CreateDefaultSubobject<UDreamShoulderCameraComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
-	CameraBoom->TargetArmLength = 420.0f;
 	CameraBoom->bUsePawnControlRotation = true;
 	CameraBoom->SetRelativeLocation(FVector(0.0f, 0.0f, 60.0f));
 
@@ -80,6 +81,8 @@ ADreamCharacter::ADreamCharacter()
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
 	FollowCamera->bConstrainAspectRatio = false;
+	// 第一版固定水平 FOV，避免室内避障同时改变距离和视场角而产生额外的缩放感。
+	FollowCamera->FieldOfView = 80.0f;
 
 	// 手办显示面仍然挂在角色胶囊体右前方，位置、180 度显示朝向和相机映射
 	// 与原有实现保持一致。该组件的 SceneCapture 不参与角色移动输入。

@@ -59,9 +59,9 @@ private:
 	UPROPERTY(EditAnywhere, Category = "交互|手办", meta = (ClampMin = "1.0", UIMin = "1000.0"))
 	float MiniatureInteractTraceDistance = 50000.0f;
 
-	/** 滚轮每一档改变 SpringArm 长度的量（厘米）；负值反转滚轮方向。 */
+	/** 滚轮每档改变理想距离 25 cm；越肩组件负责平滑追踪，负值可反转滚轮方向。 */
 	UPROPERTY(EditAnywhere, Category = "相机")
-	float CameraZoomStep = 50.0f;
+	float CameraZoomStep = 25.0f;
 
 	/** SpringArm 允许的最小长度（厘米），防止滚轮拉得太近。 */
 	UPROPERTY(EditAnywhere, Category = "相机", meta = (ClampMin = "50", UIMin = "50"))
@@ -69,7 +69,7 @@ private:
 
 	/** SpringArm 允许的最大长度（厘米），防止滚轮拉得太远。 */
 	UPROPERTY(EditAnywhere, Category = "相机", meta = (ClampMin = "100", UIMin = "100"))
-	float MaxCameraArmLength = 800.0f;
+	float MaxCameraArmLength = 300.0f;
 
 private:
 	void ZoomCamera(const FInputActionValue& Value);

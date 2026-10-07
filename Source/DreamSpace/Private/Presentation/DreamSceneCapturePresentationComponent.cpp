@@ -1,6 +1,7 @@
 #include "DreamSceneCapturePresentationComponent.h"
 
 #include "DreamSceneCaptureAnchor.h"
+#include "DreamShoulderCameraComponent.h"
 #include "EngineUtils.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/StaticMesh.h"
@@ -534,7 +535,7 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 		// 手办坐标系以面片中心为原点，而不是组件原点：面片相对组件的偏移
 		// 不能被当成观察视差。观察位置默认取 SpringArm 未经碰撞修正的理想位置，
 		// 镜头被障碍推近时手办视角保持不变。
-		const FTransform ObserverWorld(PlayerPOV.Rotation, ResolveObserverLocation(PlayerPOV));
+		const FTransform ObserverWorld = GetObserverTransform(PlayerPOV);
 		const FTransform MiniatureFrame = ResolveDisplayPlaneWorldTransform();
 		const FTransform SceneReference = ResolveCapturedSceneReference();
 		USceneCaptureComponent2D* CaptureComponent = CaptureActor->GetCaptureComponent2D();
@@ -648,14 +649,15 @@ FTransform UDreamSceneCapturePresentationComponent::ResolveDisplayPlaneWorldTran
 	return Frame;
 }
 
-FVector UDreamSceneCapturePresentationComponent::ResolveObserverLocation(const FMinimalViewInfo& POV) const
+FTransform UDreamSceneCapturePresentationComponent::GetObserverTransform(const FMinimalViewInfo& POV) const
 {
+	const FTransform ActualObserver(POV.Rotation, POV.Location);
 	if (!bIgnoreSpringArmCollision || !GetWorld())
-		return POV.Location;
+		return ActualObserver;
 	const APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
 	const AActor* ViewTarget = PC ? PC->GetViewTarget() : nullptr;
 	if (!ViewTarget)
-		return POV.Location;
+		return ActualObserver;
 
 	// 从当前激活的相机沿父级向上找驱动它的 SpringArm；找不到时回退到任意 SpringArm。
 	const USpringArmComponent* SpringArm = nullptr;
@@ -678,27 +680,26 @@ FVector UDreamSceneCapturePresentationComponent::ResolveObserverLocation(const F
 	if (!SpringArm)
 		SpringArm = ViewTarget->FindComponentByClass<USpringArmComponent>();
 	if (!SpringArm)
-		return POV.Location;
+		return ActualObserver;
 
 	// 手办用固定的 ObserverArmLength 计算观察位置，而不是实时的 TargetArmLength。
 	// 这样玩家用滚轮改实际相机臂长时，手办视角保持不变。
 	// bFollowCameraZoom 开启时才跟随实际臂长。
+	if (const UDreamShoulderCameraComponent* ShoulderCamera = Cast<UDreamShoulderCameraComponent>(SpringArm))
+	{
+		// 固定观察距离继续使用旧的 420 cm 景别；开启缩放跟随后才取平滑后的新臂长。
+		// 位置和旋转必须来自同一次相机更新，不能混用真实位置、理想旋转和未阻尼的滚轮目标。
+		const float ArmLength = bFollowCameraZoom ? ShoulderCamera->GetSmoothedArmLength() : ObserverArmLength;
+		return ShoulderCamera->GetIdealCameraTransform(ArmLength);
+	}
+
+	// 普通 SpringArm 的回退路径：TargetOffset 为世界空间，SocketOffset 由目标相机旋转变换。
+	// 旧公式把两者的空间颠倒；零偏移时看不出问题，增加越肩或自定义重力后会产生明显偏差。
 	const float ArmLength = bFollowCameraZoom ? SpringArm->TargetArmLength : ObserverArmLength;
-	const FVector SocketOffset = SpringArm->SocketOffset;
-	const FVector TargetOffset = SpringArm->TargetOffset;
-
-	// 复现 SpringArm 的位置计算：枢轴 = ComponentLocation + SocketOffset，
-	// 镜头理想位置 = 枢轴 + TargetOffset - CameraForward × ArmLength。
-	// 这里不用 GetUnfixedCameraPosition()，因为它返回的是 TargetArmLength 那根臂。
-	const FTransform ArmWorld = SpringArm->GetComponentTransform();
-	const FVector PivotWorld = ArmWorld.TransformPosition(SocketOffset);
-	const FQuat ArmRotation = (SpringArm->bUsePawnControlRotation && ViewTarget->GetInstigatorController())
-		? ViewTarget->GetInstigatorController()->GetControlRotation().Quaternion()
-		: ArmWorld.GetRotation();
-	const FVector DesiredLocation = PivotWorld + ArmRotation.RotateVector(TargetOffset - FVector(ArmLength, 0.0f, 0.0f));
-
-	// SpringArm 首次更新前 GetUnfixedCameraPosition 是零向量；这里也做同样的检查。
-	return DesiredLocation.IsZero() ? POV.Location : DesiredLocation;
+	const FRotator ArmRotation = SpringArm->GetTargetRotation();
+	const FVector DesiredLocation = SpringArm->GetComponentLocation() + SpringArm->TargetOffset
+		+ ArmRotation.RotateVector(SpringArm->SocketOffset - FVector(ArmLength, 0.0f, 0.0f));
+	return FTransform(ArmRotation, DesiredLocation);
 }
 
 void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
@@ -783,7 +784,7 @@ void UDreamSceneCapturePresentationComponent::DrawCaptureDebug() const
 	const FTransform CaptureWorld = CaptureActor->GetActorTransform();
 	const FTransform SceneReference = ResolveCapturedSceneReference();
 	const FTransform MiniatureFrame = ResolveDisplayPlaneWorldTransform();
-	const FVector ObserverLocation = ResolveObserverLocation(POV);
+	const FVector ObserverLocation = GetObserverTransform(POV).GetLocation();
 	const FVector CaptureForward = CaptureWorld.GetRotation().GetForwardVector();
 	const FVector PlaneNormal = DisplayMesh ? DisplayMesh->GetUpVector() : FVector::ZeroVector;
 	// 映射使用的观察方向：从理想观察位置指向面片中心的视线。世界空间直接比较，
