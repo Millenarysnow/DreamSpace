@@ -4,10 +4,11 @@
 class UInputMappingContext;
 class UInputAction;
 class UActorComponent;
+class UDreamDragInteractionComponent;
 struct FInputActionValue;
 
 /**
- * 第三人称探索控制器：只负责移动、视角、跳跃和交互触发。
+ * 第三人称探索控制器：安装输入映射，管理视角、拾取、单次交互和持续拖动输入。
  * 旧的策划可配置交互框架（选择/会话/事务/撤销等）已整体移除；
  * 具体的解谜行为全部由挂在 Actor 上的组件实现，控制器不感知细节。
  */
@@ -22,6 +23,11 @@ public:
 	virtual void ReceivedPlayer() override;
 	virtual void SetupInputComponent() override;
 	virtual void UpdateRotation(float DeltaTime) override;
+	virtual void PlayerTick(float DeltaTime) override;
+	virtual void OnUnPossess() override;
+	/** 是否正在通过 E 或手办左键持续操纵一个自由交互组件。 */
+	UFUNCTION(BlueprintPure, Category = "交互")
+	bool IsDraggingInteraction() const;
 	/** 当前是否显示鼠标、允许直接点击手办中的物体。供开发期 HUD 显示操作提示。 */
 	bool IsMiniatureInteractionMode() const { return bMiniatureInteractionMode; }
 	/** HUD 在屏幕上显示最近一次点击的十字和结果，避免沿视线的世界调试线缩成一个点。 */
@@ -73,8 +79,10 @@ private:
 
 private:
 	void ZoomCamera(const FInputActionValue& Value);
-	/** E 键触发：对视线命中的 Actor 调用其身上所有可交互组件。 */
+	/** E 按下：普通组件触发一次，自由组件进入持续拖动；松开 E 结束自由拖动。 */
 	void Interact();
+	void EndWorldDrag();
+	void EndMiniatureDrag();
 	/** Tab 切换光标模式：进入时暂停鼠标转视角，左键改为点击手办画面。 */
 	void ToggleMiniatureInteractionMode();
 	void SetMiniatureInteractionMode(bool bEnabled);
@@ -83,10 +91,26 @@ private:
 	/** 与鼠标输入解耦的完整拾取路径，自动化测试可直接提供一条已知的实际视线。 */
 	void InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection);
 	friend class FDreamMiniatureConfiguredProjectionTest;
+	friend class FDreamDragControllerLifecycleTest;
+	friend class FDreamMiniatureDragMappingTest;
 	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
-	void DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent);
+	void DispatchInteraction(AActor* HitActor, UActorComponent* HitComponent,
+		const FVector& RayOrigin, const FVector& RayDirection);
+
+	/** 持续拖动只锁定一个组件，避免同一 Actor 上多个行为同时修改变换。 */
+	void BeginActiveDrag(UDreamDragInteractionComponent* Component, const FVector& RayOrigin, const FVector& RayDirection);
+	void UpdateActiveDrag();
+	/** 把任意屏幕位置映射到当前输入空间，手办模式仍使用表现组件自己的投影与边界检查。 */
+	bool TryGetDragRay(const FVector2D& ScreenPosition, FVector& OutOrigin, FVector& OutDirection) const;
+	void EndActiveDrag();
+	TWeakObjectPtr<UDreamDragInteractionComponent> ActiveDragComponent;
+	TWeakObjectPtr<APawn> DragPawn;
+	FVector2D LastDragMousePosition = FVector2D::ZeroVector;
+	bool bDragFromMiniature = false;
+	/** 每次拖动仅成对增加/减少一次输入忽略计数，不覆盖其他系统已有的输入锁。 */
+	bool bDragInputLocked = false;
 
 	/** 每条退出路径都记录诊断；仅在调试 CVar 开启时输出，不影响玩法结果。 */
 	void ReportMiniatureClick(const FString& Message, const FColor& Color);

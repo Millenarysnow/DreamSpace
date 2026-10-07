@@ -1,15 +1,12 @@
 #include "DreamRotatableComponent.h"
 #include "DreamPivotPointComponent.h"
 #include "DreamInteractionCollision.h"
+#include "DreamRotationSupport.h"
 #include "DreamPuzzleDebug.h"
 #include "DreamSpace.h"
 #include "DrawDebugHelpers.h"
-#include "Components/PrimitiveComponent.h"
-#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
-#include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/Controller.h"
 
 UDreamRotatableComponent::UDreamRotatableComponent()
 {
@@ -223,77 +220,20 @@ bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha, const TAr
 void UDreamRotatableComponent::GatherStandingCharacters(TArray<ACharacter*>& OutCharacters) const
 {
 	OutCharacters.Reset();
-	const AActor* Owner = GetOwner();
-	const USceneComponent* Root = Owner ? Owner->GetRootComponent() : nullptr;
-	if (!bRotateStandingCharacterGravity || !Root || !GetWorld())
-		return;
-
-	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
-	{
-		ACharacter* Character = *It;
-		const UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
-		// UE5.8 用 MovementBaseObject 统一描述底座；这里只接受本 Actor 上随根移动的碰撞组件。
-		// IsMovingOnGround 还排除了保留空中底座的跳跃角色，不会把跳离解释成继续站立。
-		const UPrimitiveComponent* Base = Movement
-			? Cast<UPrimitiveComponent>(Movement->GetMovementBaseObject()) : nullptr;
-		if (Movement && Movement->IsMovingOnGround() && Base && Base->GetOwner() == Owner
-			&& (Base == Root || Base->IsAttachedTo(Root)))
-		{
-			OutCharacters.Add(Character);
-		}
-	}
+	if (bRotateStandingCharacterGravity)
+		DreamRotationSupport::GatherStandingCharacters(GetOwner(), OutCharacters);
 }
 
 FTransform UDreamRotatableComponent::GetStandingCharacterTransform(
 	const ACharacter* Character, const FTransform& TargetActorTransform) const
 {
-	const FTransform CurrentActorTransform = GetOwner()->GetActorTransform();
-	const FQuat DeltaRotation = TargetActorTransform.GetRotation() * CurrentActorTransform.GetRotation().Inverse();
-	// 旋转机关不改变缩放，因此直接使用刚体增量。既包含自转，也包含枢轴偏离 Actor 原点时的公转。
-	// 这里旋转的是整个胶囊中心，而不是只移动脚底点，否则倾斜后胶囊会穿入表面或悬空。
-	const FVector NewLocation = TargetActorTransform.GetLocation()
-		+ DeltaRotation.RotateVector(Character->GetActorLocation() - CurrentActorTransform.GetLocation());
-	return FTransform(DeltaRotation * Character->GetActorQuat(), NewLocation, Character->GetActorScale3D());
+	return DreamRotationSupport::GetStandingCharacterTransform(GetOwner(), Character, TargetActorTransform);
 }
 
 void UDreamRotatableComponent::ApplyActorTransform(
 	const FTransform& TargetActorTransform, const TArray<ACharacter*>& StandingCharacters)
 {
-	AActor* Owner = GetOwner();
-	if (!Owner)
-		return;
-
-	const FTransform PreviousTransform = Owner->GetActorTransform();
-	Owner->SetActorLocationAndRotation(TargetActorTransform.GetLocation(), TargetActorTransform.GetRotation(),
-		false, nullptr, ETeleportType::None);
-	const FTransform ActualTransform = Owner->GetActorTransform();
-	const FQuat DeltaRotation = ActualTransform.GetRotation() * PreviousTransform.GetRotation().Inverse();
-
-	for (ACharacter* Character : StandingCharacters)
-	{
-		UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
-		const FVector NewLocation = ActualTransform.GetLocation()
-			+ DeltaRotation.RotateVector(Character->GetActorLocation() - PreviousTransform.GetLocation());
-		const FQuat NewRotation = DeltaRotation * Character->GetActorQuat();
-
-		// 使用角色现有的世界重力做增量旋转，不能每次都从世界 -Z 推导。
-		// 这样离开后的重力能够保留，再登上另一座已旋转的平台也不会突然重置方向。
-		Movement->SetGravityDirection(DeltaRotation.RotateVector(Movement->GetGravityDirection()));
-		Movement->Velocity = DeltaRotation.RotateVector(Movement->Velocity);
-		Character->SetActorLocationAndRotation(NewLocation, NewRotation, false, nullptr, ETeleportType::None);
-
-		// 相机由控制器世界旋转驱动，与胶囊单独转动；同步四元数才能保持原有观察方向。
-		// 直接用平台增量还可避免瞬时 180° 时，仅从两根重力向量无法唯一确定转轴的问题。
-		if (AController* Controller = Character->GetController())
-		{
-			Controller->SetControlRotation((DeltaRotation * Controller->GetControlRotation().Quaternion()).Rotator());
-		}
-
-		// 本函数已经完成底座搬运。刷新缓存后，CharacterMovement 的 UpdateBasedMovement
-		// 不会再搬运一次，也不会叠加第二次相机旋转；随后重新查询新重力下的真实地面。
-		Movement->SaveBaseLocation();
-		Movement->bForceNextFloorCheck = true;
-	}
+	DreamRotationSupport::ApplyActorTransform(GetOwner(), TargetActorTransform, StandingCharacters);
 }
 
 void UDreamRotatableComponent::BeginReturn()
