@@ -21,7 +21,7 @@ namespace
 }
 
 float DreamInteractionCollision::FindSafeMoveFraction(
-	const AActor* Actor, const FTransform& TargetActorTransform)
+	const AActor* Actor, const FTransform& TargetActorTransform, TConstArrayView<AActor*> IgnoredActors)
 {
 	const UWorld* World = Actor ? Actor->GetWorld() : nullptr;
 	if (!World || !Actor->GetActorEnableCollision())
@@ -30,6 +30,8 @@ float DreamInteractionCollision::FindSafeMoveFraction(
 	const FTransform CurrentActorTransform = Actor->GetActorTransform();
 	FComponentQueryParams QueryParams(SCENE_QUERY_STAT(DreamInteractionMove), Actor);
 	QueryParams.bIgnoreTouches = true;
+	for (const AActor* IgnoredActor : IgnoredActors)
+		QueryParams.AddIgnoredActor(IgnoredActor);
 	float SafeFraction = 1.0f;
 
 	TArray<UPrimitiveComponent*> Components;

@@ -4,7 +4,12 @@
 #include "DreamPuzzleDebug.h"
 #include "DreamSpace.h"
 #include "DrawDebugHelpers.h"
+#include "Components/PrimitiveComponent.h"
+#include "EngineUtils.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Controller.h"
 
 UDreamRotatableComponent::UDreamRotatableComponent()
 {
@@ -49,6 +54,11 @@ void UDreamRotatableComponent::TickComponent(
 		return;
 	}
 
+	// 只在真正运动的帧查询角色；同一帧所有碰撞子步复用这份名单，避免反复遍历世界。
+	// 下一帧重新判断底座与移动模式，角色走下或跳离后立即停止跟随，重力值则自然保留。
+	TArray<ACharacter*> StandingCharacters;
+	GatherStandingCharacters(StandingCharacters);
+
 	if (bReturning)
 	{
 		ReturnElapsed += DeltaTime;
@@ -56,12 +66,10 @@ void UDreamRotatableComponent::TickComponent(
 			? 1.0f : FMath::Clamp(ReturnElapsed / ReturnDuration, 0.0f, 1.0f);
 		const float Ease = RawReturnAlpha * RawReturnAlpha * (3.0f - 2.0f * RawReturnAlpha);
 		const FTransform ReturnTransform = GetActorTransformAtAlpha(SafeRotationAlpha * (1.0f - Ease));
-		Owner->SetActorLocationAndRotation(ReturnTransform.GetLocation(), ReturnTransform.GetRotation(),
-			false, nullptr, ETeleportType::None);
+		ApplyActorTransform(ReturnTransform, StandingCharacters);
 		if (RawReturnAlpha >= 1.0f)
 		{
-			Owner->SetActorLocationAndRotation(StartActorTransform.GetLocation(),
-				StartActorTransform.GetRotation(), false, nullptr, ETeleportType::None);
+			ApplyActorTransform(StartActorTransform, StandingCharacters);
 			bReturning = false;
 			bRotating = false;
 		}
@@ -77,7 +85,7 @@ void UDreamRotatableComponent::TickComponent(
 
 	if (bConsiderCollision)
 	{
-		if (!AdvanceWithCollision(Alpha))
+		if (!AdvanceWithCollision(Alpha, StandingCharacters))
 		{
 			BeginReturn();
 			return;
@@ -86,8 +94,7 @@ void UDreamRotatableComponent::TickComponent(
 	else
 	{
 		const FTransform NextTransform = GetActorTransformAtAlpha(Alpha);
-		Owner->SetActorLocationAndRotation(NextTransform.GetLocation(), NextTransform.GetRotation(),
-			false, nullptr, ETeleportType::None);
+		ApplyActorTransform(NextTransform, StandingCharacters);
 	}
 
 	if (RawAlpha >= 1.0f)
@@ -135,19 +142,19 @@ void UDreamRotatableComponent::TriggerRotation()
 
 	if (RotationDuration <= 0.0f)
 	{
+		TArray<ACharacter*> StandingCharacters;
+		GatherStandingCharacters(StandingCharacters);
 		// 0 秒仍要检查整段旋转弧线；受阻时没有动画时间，立即精确回到原位。
 		SafeRotationAlpha = 0.0f;
-		if (bConsiderCollision && !AdvanceWithCollision(1.0f))
+		if (bConsiderCollision && !AdvanceWithCollision(1.0f, StandingCharacters))
 		{
-			Owner->SetActorLocationAndRotation(StartActorTransform.GetLocation(),
-				StartActorTransform.GetRotation(), false, nullptr, ETeleportType::None);
+			ApplyActorTransform(StartActorTransform, StandingCharacters);
 			return;
 		}
 		if (!bConsiderCollision)
 		{
 			const FTransform TargetTransform = GetActorTransformAtAlpha(1.0f);
-			Owner->SetActorLocationAndRotation(TargetTransform.GetLocation(), TargetTransform.GetRotation(),
-				false, nullptr, ETeleportType::None);
+			ApplyActorTransform(TargetTransform, StandingCharacters);
 		}
 		return;
 	}
@@ -169,7 +176,7 @@ FTransform UDreamRotatableComponent::GetActorTransformAtAlpha(float Alpha) const
 		StartActorTransform.GetScale3D());
 }
 
-bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha)
+bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha, const TArray<ACharacter*>& StandingCharacters)
 {
 	AActor* Owner = GetOwner();
 	if (!Owner)
@@ -178,7 +185,15 @@ bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha)
 	// UE 不扫旋转体积：把本帧需前进的弧线切成小段。除最大 2° 外，
 	// 还限制最远碰撞点每段的弧长到 2 cm，门板很长时也不会一步跨过薄障碍。
 	const float FullAngle = 2.0f * FMath::Acos(FMath::Clamp(FMath::Abs(FullStepQuat.W), 0.0f, 1.0f));
-	const float Radius = DreamInteractionCollision::GetMaxCollisionRadius(Owner, PivotWorldLocation);
+	float Radius = DreamInteractionCollision::GetMaxCollisionRadius(Owner, PivotWorldLocation);
+	TArray<AActor*> MovingActors;
+	MovingActors.Add(Owner);
+	for (ACharacter* Character : StandingCharacters)
+	{
+		MovingActors.Add(Character);
+		// 角色也会绕枢轴公转，胶囊可能比平台更远；把它纳入半径估计，避免扫过薄障碍。
+		Radius = FMath::Max(Radius, DreamInteractionCollision::GetMaxCollisionRadius(Character, PivotWorldLocation));
+	}
 	const float MaxAlphaStep = FMath::Min(1.0f,
 		FMath::Min(FMath::DegreesToRadians(2.0f) / FMath::Max(FullAngle, KINDA_SMALL_NUMBER),
 			2.0f / FMath::Max(FullAngle * Radius, KINDA_SMALL_NUMBER)));
@@ -189,13 +204,96 @@ bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha)
 	{
 		const float NextAlpha = FMath::Lerp(FromAlpha, TargetAlpha, static_cast<float>(Index) / Steps);
 		const FTransform NextTransform = GetActorTransformAtAlpha(NextAlpha);
-		if (DreamInteractionCollision::FindSafeMoveFraction(Owner, NextTransform) < 1.0f)
+		// 站立角色与平台同步移动，不能把角色仍位于上一子步的胶囊误判成平台前方的障碍。
+		// 同时分别检查每个角色的目标姿态，保证忽略乘客不会使乘客穿入墙壁或天花板。
+		if (DreamInteractionCollision::FindSafeMoveFraction(Owner, NextTransform, MovingActors) < 1.0f)
 			return false;
-		Owner->SetActorLocationAndRotation(NextTransform.GetLocation(), NextTransform.GetRotation(),
-			false, nullptr, ETeleportType::None);
+		for (const ACharacter* Character : StandingCharacters)
+		{
+			const FTransform CharacterTarget = GetStandingCharacterTransform(Character, NextTransform);
+			if (DreamInteractionCollision::FindSafeMoveFraction(Character, CharacterTarget, MovingActors) < 1.0f)
+				return false;
+		}
+		ApplyActorTransform(NextTransform, StandingCharacters);
 		SafeRotationAlpha = NextAlpha;
 	}
 	return true;
+}
+
+void UDreamRotatableComponent::GatherStandingCharacters(TArray<ACharacter*>& OutCharacters) const
+{
+	OutCharacters.Reset();
+	const AActor* Owner = GetOwner();
+	const USceneComponent* Root = Owner ? Owner->GetRootComponent() : nullptr;
+	if (!bRotateStandingCharacterGravity || !Root || !GetWorld())
+		return;
+
+	for (TActorIterator<ACharacter> It(GetWorld()); It; ++It)
+	{
+		ACharacter* Character = *It;
+		const UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
+		// UE5.8 用 MovementBaseObject 统一描述底座；这里只接受本 Actor 上随根移动的碰撞组件。
+		// IsMovingOnGround 还排除了保留空中底座的跳跃角色，不会把跳离解释成继续站立。
+		const UPrimitiveComponent* Base = Movement
+			? Cast<UPrimitiveComponent>(Movement->GetMovementBaseObject()) : nullptr;
+		if (Movement && Movement->IsMovingOnGround() && Base && Base->GetOwner() == Owner
+			&& (Base == Root || Base->IsAttachedTo(Root)))
+		{
+			OutCharacters.Add(Character);
+		}
+	}
+}
+
+FTransform UDreamRotatableComponent::GetStandingCharacterTransform(
+	const ACharacter* Character, const FTransform& TargetActorTransform) const
+{
+	const FTransform CurrentActorTransform = GetOwner()->GetActorTransform();
+	const FQuat DeltaRotation = TargetActorTransform.GetRotation() * CurrentActorTransform.GetRotation().Inverse();
+	// 旋转机关不改变缩放，因此直接使用刚体增量。既包含自转，也包含枢轴偏离 Actor 原点时的公转。
+	// 这里旋转的是整个胶囊中心，而不是只移动脚底点，否则倾斜后胶囊会穿入表面或悬空。
+	const FVector NewLocation = TargetActorTransform.GetLocation()
+		+ DeltaRotation.RotateVector(Character->GetActorLocation() - CurrentActorTransform.GetLocation());
+	return FTransform(DeltaRotation * Character->GetActorQuat(), NewLocation, Character->GetActorScale3D());
+}
+
+void UDreamRotatableComponent::ApplyActorTransform(
+	const FTransform& TargetActorTransform, const TArray<ACharacter*>& StandingCharacters)
+{
+	AActor* Owner = GetOwner();
+	if (!Owner)
+		return;
+
+	const FTransform PreviousTransform = Owner->GetActorTransform();
+	Owner->SetActorLocationAndRotation(TargetActorTransform.GetLocation(), TargetActorTransform.GetRotation(),
+		false, nullptr, ETeleportType::None);
+	const FTransform ActualTransform = Owner->GetActorTransform();
+	const FQuat DeltaRotation = ActualTransform.GetRotation() * PreviousTransform.GetRotation().Inverse();
+
+	for (ACharacter* Character : StandingCharacters)
+	{
+		UCharacterMovementComponent* Movement = Character->GetCharacterMovement();
+		const FVector NewLocation = ActualTransform.GetLocation()
+			+ DeltaRotation.RotateVector(Character->GetActorLocation() - PreviousTransform.GetLocation());
+		const FQuat NewRotation = DeltaRotation * Character->GetActorQuat();
+
+		// 使用角色现有的世界重力做增量旋转，不能每次都从世界 -Z 推导。
+		// 这样离开后的重力能够保留，再登上另一座已旋转的平台也不会突然重置方向。
+		Movement->SetGravityDirection(DeltaRotation.RotateVector(Movement->GetGravityDirection()));
+		Movement->Velocity = DeltaRotation.RotateVector(Movement->Velocity);
+		Character->SetActorLocationAndRotation(NewLocation, NewRotation, false, nullptr, ETeleportType::None);
+
+		// 相机由控制器世界旋转驱动，与胶囊单独转动；同步四元数才能保持原有观察方向。
+		// 直接用平台增量还可避免瞬时 180° 时，仅从两根重力向量无法唯一确定转轴的问题。
+		if (AController* Controller = Character->GetController())
+		{
+			Controller->SetControlRotation((DeltaRotation * Controller->GetControlRotation().Quaternion()).Rotator());
+		}
+
+		// 本函数已经完成底座搬运。刷新缓存后，CharacterMovement 的 UpdateBasedMovement
+		// 不会再搬运一次，也不会叠加第二次相机旋转；随后重新查询新重力下的真实地面。
+		Movement->SaveBaseLocation();
+		Movement->bForceNextFloorCheck = true;
+	}
 }
 
 void UDreamRotatableComponent::BeginReturn()

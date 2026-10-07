@@ -14,8 +14,10 @@ namespace DreamInteractionCollision
 	 * 检查 Actor 从当前姿态到目标姿态的运动。
 	 * 返回 1 表示整段可以通过；小于 1 表示受阻，数值是平移扫掠所能到达的安全比例。
 	 * 如果阻挡来自目标姿态的旋转重叠，则保守地返回 0，由调用方留在上一安全姿态。
+	 * IgnoredActors 用于排除与机关同步搬运的站立角色；默认留空，维持原有碰撞行为。
 	 */
-	float FindSafeMoveFraction(const AActor* Actor, const FTransform& TargetActorTransform);
+	float FindSafeMoveFraction(const AActor* Actor, const FTransform& TargetActorTransform,
+		TConstArrayView<AActor*> IgnoredActors = {});
 
 	/** 估计有查询碰撞的组件到转轴的最大半径，用来限制旋转子步中最远点的移动距离。 */
 	float GetMaxCollisionRadius(const AActor* Actor, const FVector& PivotWorldLocation);

@@ -6,6 +6,7 @@
 #include "DreamRotatableComponent.generated.h"
 
 class UDreamPivotPointComponent;
+class ACharacter;
 
 /** 可转动组件允许绕枢轴点局部坐标系的哪一根轴转动。 */
 UENUM(BlueprintType)
@@ -28,6 +29,7 @@ enum class EDreamPivotRotationAxis : uint8
  * - 玩家（或蓝图）触发交互后，所属 Actor 会在 RotationDuration 秒内平滑地
  *   绕“过枢轴点的目标轴”公转 + 自转；RotationDuration 为 0 时瞬间完成；
  * - 转动进行中再次触发会被忽略，避免姿态叠加出错。
+ * - 可选开启站立角色重力跟随：角色随平台转动，离开后仍保留最后的世界重力方向。
  *
  * 由于枢轴点是一个独立组件，策划可以自由摆放它的位置和朝向，
  * 从而实现门绕铰链转、机关绕任意斜轴转等效果，而不需要修改代码。
@@ -98,6 +100,17 @@ private:
 		meta = (AllowPrivateAccess = "true", DisplayName = "运动考虑碰撞"))
 	bool bConsiderCollision = false;
 
+	/**
+	 * 开启后，只影响当前真正站在所属 Actor 的移动碰撞组件上的 Character。
+	 * 每次实际转动都把角色的位置、胶囊朝向、世界重力方向和控制器视角一起旋转，
+	 * 因此平台绕 X/Y 轴倾斜至墙面或天花板时，角色仍可在该表面站立和行走。
+	 * 走下平台或跳离后停止跟随，但不恢复原重力；下一座平台从角色当前重力继续旋转。
+	 * 与“运动考虑碰撞”独立配置；受阻回弹时仍在平台上的角色会同步转回。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "可转动|重力",
+		meta = (AllowPrivateAccess = "true", DisplayName = "站立角色重力跟随旋转"))
+	bool bRotateStandingCharacterGravity = false;
+
 	/** 调试绘制时转轴箭头的长度（厘米）。 */
 	UPROPERTY(EditAnywhere, Category = "调试", meta = (ClampMin = "0.0", UIMin = "0.0"))
 	float DebugAxisDrawLength = 150.0f;
@@ -142,7 +155,22 @@ private:
 	FTransform GetActorTransformAtAlpha(float Alpha) const;
 
 	/** 沿旋转弧线检查并推进到目标进度；遇阻时停在最后一个安全姿态。 */
-	bool AdvanceWithCollision(float TargetAlpha);
+	bool AdvanceWithCollision(float TargetAlpha, const TArray<ACharacter*>& StandingCharacters);
+
+	/**
+	 * 每帧运动前重新收集站立角色，不用空间重叠推断站立，也不把角色附着到平台。
+	 * 这样从旁边经过、正在下落或已跳离的角色不会被吸住，中途登上平台也能参与后续旋转。
+	 */
+	void GatherStandingCharacters(TArray<ACharacter*>& OutCharacters) const;
+
+	/** 预测平台从当前姿态到目标姿态时，站立角色应到达的完整世界变换。 */
+	FTransform GetStandingCharacterTransform(const ACharacter* Character, const FTransform& TargetActorTransform) const;
+
+	/**
+	 * 统一应用平台姿态与站立角色的增量旋转，覆盖普通插值、碰撞子步、瞬时旋转和回弹。
+	 * 同时刷新 CharacterMovement 的底座缓存，防止引擎随后再次搬运同一段平台位移。
+	 */
+	void ApplyActorTransform(const FTransform& TargetActorTransform, const TArray<ACharacter*>& StandingCharacters);
 
 	/** 从当前已通过的角度开始回弹，完成后精确恢复起始姿态。 */
 	void BeginReturn();
