@@ -186,6 +186,10 @@ void UDreamSceneCapturePresentationComponent::CreatePresentationResources()
 	CaptureComponent->CaptureSource = CaptureSource;
 	CaptureComponent->ProjectionType = ProjectionType;
 	CaptureComponent->FOVAngle = CaptureFOV;
+	// 手办即使开启显示角色，也使用完整身体。明确清除主视角局部剔除的 UserFlags 第 6 位，
+	// 防止捕获位置恰好与主镜头相同时复用剔除；主相机的参数仍只属于自己的 MID。
+	CaptureComponent->PostProcessSettings.bOverride_UserFlags = true;
+	CaptureComponent->PostProcessSettings.UserFlags &= ~UDreamShoulderCameraComponent::OwnerClipViewFlag;
 	// 黑名单模式：正常渲染场景中的 Primitive，再排除 HiddenActors。
 	CaptureComponent->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_RenderScenePrimitives;
 	CaptureComponent->bCaptureEveryFrame = true;

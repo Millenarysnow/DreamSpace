@@ -5,6 +5,8 @@
 #include "DreamShoulderCameraComponent.generated.h"
 
 class USkeletalMeshComponent;
+class UMaterialInterface;
+class UMaterialInstanceDynamic;
 
 /**
  * 探索模式的越肩相机：保留 SpringArm 的挂接接口，独立处理室内避障的时间连续性。
@@ -38,6 +40,14 @@ public:
 
 	/** 当前肩位比例，1 表示完整右肩，0 表示回到中轴；供调试与运行时观察使用。 */
 	float GetShoulderWeight() const { return ShoulderWeight; }
+
+	/** 当前局部剔除强度与外半径。仅供调参/测试观察，不用于决定整个网格的可见性。 */
+	float GetOwnerClipAmount() const { return OwnerClipAmount; }
+	float GetOwnerClipRadius() const { return OwnerClipRadius; }
+	float GetOwnerSurfaceDistance() const { return OwnerSurfaceDistance; }
+
+	/** 主视角后处理 UserFlags 的第 6 位；材质也检查此位，SceneCapture/切镜头不会继承剔除。 */
+	static constexpr int32 OwnerClipViewFlag = 1 << 6;
 
 	/** 传送或主动切镜头时清除历史，下一帧直接建立新姿态，不沿旧位置缓慢追赶。 */
 	UFUNCTION(BlueprintCallable, Category = "相机|越肩")
@@ -91,17 +101,40 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|肩位", meta = (ClampMin = "0.0", UIMax = "0.5"))
 	float ShoulderRecoveryHalfLife = 0.18f;
 
-	/** 仅隐藏持有者视口中的人物网格，碰撞、动画和其他玩家看到的角色不受影响。 */
+	/**
+	 * 镜头贴近时仅剔除相机附近的局部表面，保留外围和下方身体，不切换 OwnerNoSee。
+	 * 材质需接入 DreamOwnerClip 参数；默认角色使用已生成的 Quinn 副本。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡")
-	bool bHideOwnerWhenTooClose = true;
+	bool bEnableOwnerLocalClipping = true;
 
-	/** 镜头到胶囊中心小于此距离时隐藏人物；默认不要求 Quinn 材质支持透明度。 */
+	/** 距最近身体表面小于此值时逐渐加强；优先查询动画骨骼上的物理资产，不用人物中心距离。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "0.0"))
-	float OwnerHideDistance = 90.0f;
+	float OwnerClipStartDistance = 85.0f;
 
-	/** 恢复距离大于隐藏距离，避免人物在阈值附近闪烁；运行时也会强制这两个值有间隔。 */
+	/** 距表面达到此值时目标强度为 1；处于身体内部也按 0 cm 处理，没有二元隐藏阈值。 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "0.0"))
-	float OwnerShowDistance = 115.0f;
+	float OwnerClipFullDistance = 12.0f;
+
+	/** 开始接近时的局部球形区域外半径；强度从 0 开始，因此不会突然挖出一个完整洞。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "1.0"))
+	float OwnerClipMinRadius = 38.0f;
+
+	/** 极近时的最大外半径；限制影响区域，避免以人物中心球将整个角色同时剔除。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "1.0"))
+	float OwnerClipMaxRadius = 85.0f;
+
+	/** 剔除球外缘的柔和宽度；完全加强后只有边缘抖动，强度过渡期间内核也渐变，球外不透明。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "1.0"))
+	float OwnerClipFeather = 18.0f;
+
+	/** 收近时迅速扩大局部区域，半衰期与帧率无关；位置始终跟随实际镜头，不滞后挖洞。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "0.0"))
+	float OwnerClipInHalfLife = 0.045f;
+
+	/** 离开身体时较慢恢复，避免动画或墙角的小幅距离变化造成反复显隐。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|人物遮挡", meta = (ClampMin = "0.0"))
+	float OwnerClipOutHalfLife = 0.12f;
 
 protected:
 	/** 替代默认 SpringArm 的即时碰撞回弹，仍输出原有的 SpringEndpoint Socket。 */
@@ -117,8 +150,10 @@ private:
 
 	FCameraSweep SweepCamera(const FVector& Start, const FVector& End, float Radius) const;
 	FVector GetGravityUp() const;
-	void UpdateOwnerVisibility(const FVector& CameraLocation);
-	void RestoreOwnerVisibility();
+	void UpdateOwnerClipping(const FVector& CameraLocation, const FRotator& CameraRotation, float DeltaTime);
+	void BindOwnerClipMaterials(USkeletalMeshComponent* Mesh);
+	void RestoreOwnerClipMaterials();
+	float QueryOwnerSurfaceDistance(const USkeletalMeshComponent* Mesh, const FVector& CameraLocation) const;
 	void DrawCameraDebug(const FVector& Pivot, const FVector& Ideal, const FVector& Actual, const FCameraSweep& ActualSweep) const;
 	static float Damp(float Current, float Target, float HalfLife, float DeltaTime);
 
@@ -138,7 +173,17 @@ private:
 	FVector ObserverPivot = FVector::ZeroVector;
 	FRotator ObserverRotation = FRotator::ZeroRotator;
 
-	/** 只恢复本组件亲自修改过的网格状态，避免覆盖角色原先的 OwnerNoSee 配置。 */
-	TWeakObjectPtr<USkeletalMeshComponent> HiddenOwnerMesh;
-	bool bSavedOwnerNoSee = false;
+	float OwnerClipAmount = 0.0f;
+	float OwnerClipRadius = 38.0f;
+	float OwnerSurfaceDistance = 0.0f;
+
+	/**
+	 * 每个角色持有自己的 MID，不能修改共享材质或用全局参数集合，否则其他视口也会被挖洞。
+	 * 与原材质槽对齐保存引用；清理时只恢复仍是本组件 MID 的槽，尊重外部换装/材质替换。
+	 */
+	TWeakObjectPtr<USkeletalMeshComponent> ClippedOwnerMesh;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInterface>> OriginalOwnerMaterials;
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UMaterialInstanceDynamic>> OwnerClipMaterials;
 };

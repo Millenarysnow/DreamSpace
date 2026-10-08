@@ -1,12 +1,25 @@
 #include "DreamShoulderCameraComponent.h"
 
+#include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
+#include "Materials/MaterialInstanceDynamic.h"
+
+namespace
+{
+	// 参数名同时用于生成脚本和材质资产。只给声明了 Amount 的材质创建 MID，未知材质保持可见。
+	const FName ClipAmountParameter(TEXT("DreamOwnerClipAmount"));
+	const FName ClipRadiusParameter(TEXT("DreamOwnerClipRadius"));
+	const FName ClipFeatherParameter(TEXT("DreamOwnerClipFeather"));
+	const FName ClipCameraLocalParameter(TEXT("DreamOwnerClipCameraLocal"));
+	const FName ClipCameraForwardParameter(TEXT("DreamOwnerClipCameraForward"));
+}
 
 static bool bDreamShoulderCameraDebug = false;
 static FAutoConsoleVariableRef CVarDreamShoulderCameraDebug(
@@ -228,49 +241,141 @@ void UDreamShoulderCameraComponent::UpdateDesiredArmLocation(
 	RelativeSocketLocation = RelativeCamera.GetLocation();
 	RelativeSocketRotation = RelativeCamera.GetRotation();
 	UpdateChildTransforms();
-	UpdateOwnerVisibility(Actual);
+	UpdateOwnerClipping(Actual, Rotation, Step);
 	if (bDreamShoulderCameraDebug)
 		DrawCameraDebug(CollisionPivot, UnfixedCameraPosition, Actual, ActualSweep);
 }
 
-void UDreamShoulderCameraComponent::UpdateOwnerVisibility(const FVector& CameraLocation)
+float UDreamShoulderCameraComponent::QueryOwnerSurfaceDistance(
+	const USkeletalMeshComponent* Mesh, const FVector& CameraLocation) const
 {
-	ACharacter* Character = Cast<ACharacter>(GetOwner());
-	if (!bHideOwnerWhenTooClose || !Character || !Character->IsLocallyControlled() || !IsActive())
+	// 物理资产的简单体随动画骨骼运动，比胶囊中心能更准确地感知肩背、头部和伸出的手臂。
+	// false 表示真实表面距离，不使用“到骨骼中心距离”的快速近似；进入简单体内部返回 0。
+	FClosestPointOnPhysicsAsset Closest;
+	if (Mesh && Mesh->GetClosestPointOnPhysicsAsset(CameraLocation, Closest, false)
+		&& FMath::IsFinite(Closest.Distance) && Closest.Distance >= 0.0f)
+		return Closest.Distance;
+
+	// 没有物理资产时退回胶囊表面。沿胶囊局部 Z 的线段求最近点，支持平台翻转与非世界 Z 重力。
+	if (const ACharacter* Character = Cast<ACharacter>(GetOwner()))
 	{
-		RestoreOwnerVisibility();
-		return;
+		const UCapsuleComponent* Capsule = Character->GetCapsuleComponent();
+		const float Radius = Capsule->GetScaledCapsuleRadius();
+		const float AxisHalfLength = FMath::Max(0.0f, Capsule->GetScaledCapsuleHalfHeight() - Radius);
+		const FVector Axis = Capsule->GetUpVector();
+		const FVector Center = Capsule->GetComponentLocation();
+		const float AlongAxis = FMath::Clamp(FVector::DotProduct(CameraLocation - Center, Axis),
+			-AxisHalfLength, AxisHalfLength);
+		return FMath::Max(0.0f, FVector::Distance(CameraLocation, Center + Axis * AlongAxis) - Radius);
 	}
-	USkeletalMeshComponent* Mesh = Character->GetMesh();
-	const float Distance = FVector::Distance(CameraLocation, Character->GetActorLocation());
-	const float HideAt = FMath::Max(OwnerHideDistance, 0.0f);
-	const float ShowAt = FMath::Max(OwnerShowDistance, HideAt + 1.0f);
-	if (HiddenOwnerMesh.IsValid() && (HiddenOwnerMesh.Get() != Mesh || Distance >= ShowAt))
-		RestoreOwnerVisibility();
-	if (!HiddenOwnerMesh.IsValid() && Mesh && Distance < HideAt)
+	return UE_BIG_NUMBER;
+}
+
+void UDreamShoulderCameraComponent::BindOwnerClipMaterials(USkeletalMeshComponent* Mesh)
+{
+	bool bBindingsMatch = ClippedOwnerMesh.Get() == Mesh && Mesh->GetNumMaterials() == OwnerClipMaterials.Num();
+	for (int32 Slot = 0; bBindingsMatch && Slot < OwnerClipMaterials.Num(); ++Slot)
+		bBindingsMatch = Mesh->GetMaterial(Slot) == (OwnerClipMaterials[Slot]
+			? static_cast<UMaterialInterface*>(OwnerClipMaterials[Slot].Get()) : OriginalOwnerMaterials[Slot].Get());
+	if (bBindingsMatch)
+		return;
+
+	// 网格或材质槽被换装逻辑替换后，先释放自己仍控制的槽，再为新材质建立独立实例。
+	RestoreOwnerClipMaterials();
+	ClippedOwnerMesh = Mesh;
+	for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
 	{
-		bSavedOwnerNoSee = Mesh->bOwnerNoSee;
-		HiddenOwnerMesh = Mesh;
-		Mesh->SetOwnerNoSee(true);
+		UMaterialInterface* Source = Mesh->GetMaterial(Slot);
+		OriginalOwnerMaterials.Add(Source);
+		float DefaultAmount = 0.0f;
+		UMaterialInstanceDynamic* Instance = nullptr;
+		if (Source && Source->GetScalarParameterValue(FMaterialParameterInfo(ClipAmountParameter), DefaultAmount))
+		{
+			Instance = UMaterialInstanceDynamic::Create(Source, this);
+			Instance->SetScalarParameterValue(ClipAmountParameter, 0.0f);
+			Mesh->SetMaterial(Slot, Instance);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning, TEXT("越肩相机：材质 %s 未接入 DreamOwnerClipAmount，槽 %d 保持原材质可见。"),
+				*GetNameSafe(Source), Slot);
+		}
+		OwnerClipMaterials.Add(Instance);
 	}
 }
 
-void UDreamShoulderCameraComponent::RestoreOwnerVisibility()
+void UDreamShoulderCameraComponent::UpdateOwnerClipping(
+	const FVector& CameraLocation, const FRotator& CameraRotation, float DeltaTime)
 {
-	if (USkeletalMeshComponent* Mesh = HiddenOwnerMesh.Get())
-		Mesh->SetOwnerNoSee(bSavedOwnerNoSee);
-	HiddenOwnerMesh.Reset();
+	ACharacter* Character = Cast<ACharacter>(GetOwner());
+	const APlayerController* Controller = Character ? Cast<APlayerController>(Character->GetController()) : nullptr;
+	if (!bEnableOwnerLocalClipping || !Character || !Character->IsLocallyControlled() || !IsActive()
+		|| !Controller || Controller->GetViewTarget() != Character || !Character->GetMesh())
+	{
+		RestoreOwnerClipMaterials();
+		return;
+	}
+	USkeletalMeshComponent* Mesh = Character->GetMesh();
+	BindOwnerClipMaterials(Mesh);
+	OwnerSurfaceDistance = QueryOwnerSurfaceDistance(Mesh, CameraLocation);
+	const float FullAt = FMath::Max(0.0f, OwnerClipFullDistance);
+	const float StartAt = FMath::Max(FullAt + 1.0f, OwnerClipStartDistance);
+	const float Proximity = FMath::Clamp((StartAt - OwnerSurfaceDistance) / (StartAt - FullAt), 0.0f, 1.0f);
+	// Smoothstep 在开始/完全接近处的导数为 0，不会把距离跨阈值变成整个网格的一次切换。
+	const float TargetAmount = Proximity * Proximity * (3.0f - 2.0f * Proximity);
+	const float MinRadius = FMath::Max(1.0f, OwnerClipMinRadius);
+	const float TargetRadius = FMath::Lerp(MinRadius, FMath::Max(MinRadius, OwnerClipMaxRadius), TargetAmount);
+	OwnerClipAmount = Damp(OwnerClipAmount, TargetAmount,
+		TargetAmount > OwnerClipAmount ? OwnerClipInHalfLife : OwnerClipOutHalfLife, DeltaTime);
+	OwnerClipRadius = Damp(OwnerClipRadius, TargetRadius,
+		TargetRadius > OwnerClipRadius ? OwnerClipInHalfLife : OwnerClipOutHalfLife, DeltaTime);
+
+	// 球心直接采用本帧真实镜头。发布网格局部坐标用于视角身份核对，避免世界大坐标精度损失。
+	// 实际球形距离在材质中以世界厘米计算；角色缩放和重力翻转不改变剔除半径的单位。
+	const FVector LocalCamera = Mesh->GetComponentTransform().InverseTransformPosition(CameraLocation);
+	const FVector Forward = CameraRotation.Vector();
+	for (UMaterialInstanceDynamic* Instance : OwnerClipMaterials)
+	{
+		if (!Instance)
+			continue;
+		Instance->SetScalarParameterValue(ClipAmountParameter, OwnerClipAmount);
+		Instance->SetScalarParameterValue(ClipRadiusParameter, OwnerClipRadius);
+		Instance->SetScalarParameterValue(ClipFeatherParameter, FMath::Clamp(OwnerClipFeather, 1.0f, OwnerClipRadius));
+		Instance->SetVectorParameterValue(ClipCameraLocalParameter, FLinearColor(LocalCamera.X, LocalCamera.Y, LocalCamera.Z));
+		Instance->SetVectorParameterValue(ClipCameraForwardParameter, FLinearColor(Forward.X, Forward.Y, Forward.Z));
+	}
+}
+
+void UDreamShoulderCameraComponent::RestoreOwnerClipMaterials()
+{
+	for (int32 Slot = 0; Slot < OwnerClipMaterials.Num(); ++Slot)
+	{
+		UMaterialInstanceDynamic* Instance = OwnerClipMaterials[Slot];
+		if (!Instance)
+			continue;
+		// 即使外部还持有该 MID，也先将它恢复为不剔除状态，再解除本组件的引用。
+		Instance->SetScalarParameterValue(ClipAmountParameter, 0.0f);
+		if (USkeletalMeshComponent* Mesh = ClippedOwnerMesh.Get())
+			if (Slot < Mesh->GetNumMaterials() && Mesh->GetMaterial(Slot) == Instance)
+				Mesh->SetMaterial(Slot, OriginalOwnerMaterials[Slot]);
+	}
+	ClippedOwnerMesh.Reset();
+	OriginalOwnerMaterials.Reset();
+	OwnerClipMaterials.Reset();
+	OwnerClipAmount = 0.0f;
+	OwnerClipRadius = FMath::Max(1.0f, OwnerClipMinRadius);
+	OwnerSurfaceDistance = 0.0f;
 }
 
 void UDreamShoulderCameraComponent::ResetCameraState()
 {
 	bHasCameraState = false;
-	RestoreOwnerVisibility();
+	RestoreOwnerClipMaterials();
 }
 
 void UDreamShoulderCameraComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	RestoreOwnerVisibility();
+	RestoreOwnerClipMaterials();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -282,7 +387,7 @@ void UDreamShoulderCameraComponent::OnUnregister()
 
 void UDreamShoulderCameraComponent::Deactivate()
 {
-	// 停用会关闭 Tick，不能等下一帧再清理近距隐藏；切镜头时主动恢复人物并重建跟随历史。
+	// 停用会关闭 Tick，不能等下一帧再清理材质；切镜头时主动恢复原材质并重建跟随历史。
 	ResetCameraState();
 	Super::Deactivate();
 }
@@ -312,10 +417,10 @@ void UDreamShoulderCameraComponent::DrawCameraDebug(
 	if (GEngine)
 	{
 		const FString Message = FString::Printf(
-			TEXT("越肩相机  理想 %.0f  实际 %.0f cm  肩位 %.2f  恢复等待 %.2f s\n阻挡: %s  起点穿透: %s  人物隐藏: %s"),
+			TEXT("越肩相机  理想 %.0f  实际 %.0f cm  肩位 %.2f  恢复等待 %.2f s\n阻挡: %s  起点穿透: %s  局部剔除 %.2f / %.0f cm  身体表面距离 %.0f cm"),
 			SmoothedArmLength, CameraDistance, ShoulderWeight, DistanceRecoveryRemaining,
 			*GetNameSafe(ActualSweep.Hit.GetActor()), ActualSweep.Hit.bStartPenetrating ? TEXT("是") : TEXT("否"),
-			HiddenOwnerMesh.IsValid() ? TEXT("是") : TEXT("否"));
+			OwnerClipAmount, OwnerClipRadius, OwnerSurfaceDistance);
 		GEngine->AddOnScreenDebugMessage(static_cast<uint64>(GetUniqueID()), 0.0f, FColor::Orange, Message);
 	}
 }

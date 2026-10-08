@@ -12,6 +12,7 @@
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Misc/AutomationTest.h"
 
 namespace
@@ -33,7 +34,7 @@ namespace
 			Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 			Character = World->SpawnActor<ADreamCharacter>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
 			Controller = World->SpawnActor<ADreamPlayerController>();
-			// 补齐本地玩家身份，让 OwnerNoSee 和真实输入规则可以运行，无需真实窗口。
+			// 补齐本地玩家身份，让本地主视角材质和真实输入规则可以运行，无需真实窗口。
 			Controller->Player = NewObject<ULocalPlayer>(GEngine);
 			// 瞬时世界没有执行完整关卡初始化，手动补齐正常 PostInitializeComponents 的相机职责。
 			World->AddController(Controller);
@@ -288,41 +289,149 @@ bool FDreamShoulderGravityAndTeleportTest::RunTest(const FString& Parameters)
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamShoulderOwnerVisibilityTest,
-	"DreamSpace.Camera.Shoulder.OwnerVisibilityHysteresisAndCleanup",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamShoulderOwnerLocalClipTest,
+	"DreamSpace.Camera.Shoulder.ProgressiveOwnerLocalClipping",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
-bool FDreamShoulderOwnerVisibilityTest::RunTest(const FString& Parameters)
+bool FDreamShoulderOwnerLocalClipTest::RunTest(const FString& Parameters)
 {
 	FShoulderCameraFixture Scene;
 	USkeletalMeshComponent* Mesh = Scene.Character->GetMesh();
 	const bool OriginalOwnerNoSee = Mesh->bOwnerNoSee;
+	TestEqual(TEXT("开放空间局部剔除为零"), Scene.Camera->GetOwnerClipAmount(), 0.0f);
+	TestTrue(TEXT("主视角带有材质剔除专用标记"), Scene.Character->FollowCamera->PostProcessSettings.bOverride_UserFlags
+		&& (Scene.Character->FollowCamera->PostProcessSettings.UserFlags & UDreamShoulderCameraComponent::OwnerClipViewFlag) != 0);
+	TArray<UMaterialInstanceDynamic*> Materials;
+	for (int32 Slot = 0; Slot < Mesh->GetNumMaterials(); ++Slot)
+	{
+		UMaterialInstanceDynamic* Material = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(Slot));
+		if (!TestNotNull(TEXT("每个身体材质槽已接入本角色独立 MID"), Material))
+			return false;
+		Materials.Add(Material);
+	}
+
 	UBoxComponent* Wall = Scene.AddBlocker(FVector(-35, 0, 60), FVector(5, 500, 500));
 	Scene.Step();
-	TestTrue(TEXT("镜头被挤到人物内侧时只对持有者隐藏网格"), Mesh->bOwnerNoSee);
-	TestFalse(TEXT("人物网格没有被全局隐藏"), Mesh->bHiddenInGame);
-	TestTrue(TEXT("近距离隐藏仍保持相机不穿墙"), Scene.IsCameraClear());
-	Wall->SetWorldLocation(FVector(-130, 0, 60));
+	TestEqual(TEXT("挤入身体也不切换 OwnerNoSee"), static_cast<bool>(Mesh->bOwnerNoSee), OriginalOwnerNoSee);
+	TestFalse(TEXT("身体没有被全局隐藏"), Mesh->bHiddenInGame);
+	TestTrue(TEXT("首帧开始过渡而非切换整个身体"), Scene.Camera->GetOwnerClipAmount() > 0.0f
+		&& Scene.Camera->GetOwnerClipAmount() < 0.5f);
+	TestTrue(TEXT("局部剔除继续保持实际相机球安全"), Scene.IsCameraClear());
 	Scene.Advance(1.0f);
-	const float MiddleDistance = FVector::Distance(Scene.Position(), Scene.Character->GetActorLocation());
-	TestTrue(TEXT("测试镜头进入隐藏与恢复两个阈值之间"), MiddleDistance > 90.0f && MiddleDistance < 115.0f);
-	TestTrue(TEXT("阈值之间保持隐藏状态，避免人物闪烁"), Mesh->bOwnerNoSee);
+	TestTrue(TEXT("极近时渐进到完整局部剔除"), Scene.Camera->GetOwnerClipAmount() > 0.99f);
+	TestTrue(TEXT("范围扩大且受最大半径限制"), Scene.Camera->GetOwnerClipRadius() > Scene.Camera->OwnerClipMinRadius
+		&& Scene.Camera->GetOwnerClipRadius() <= Scene.Camera->OwnerClipMaxRadius);
+	for (UMaterialInstanceDynamic* Material : Materials)
+	{
+		TestEqual(TEXT("身体所有槽采用同样连续强度"), Material->K2_GetScalarParameterValue(TEXT("DreamOwnerClipAmount")),
+			Scene.Camera->GetOwnerClipAmount());
+		TestEqual(TEXT("材质外半径与实际缓存一致"), Material->K2_GetScalarParameterValue(TEXT("DreamOwnerClipRadius")),
+			Scene.Camera->GetOwnerClipRadius());
+		const FLinearColor Center = Material->K2_GetVectorParameterValue(TEXT("DreamOwnerClipCameraLocal"));
+		TestTrue(TEXT("材质核对位置来自真实镜头的网格局部坐标"), FVector(Center.R, Center.G, Center.B).Equals(
+			Mesh->GetComponentTransform().InverseTransformPosition(Scene.Position()), 0.001));
+	}
+
+	// 只移走骨骼网格，人物胶囊与相机不动。若仍使用人物中心距离，剔除就无法恢复。
+	const FVector MeshLocation = Mesh->GetRelativeLocation();
+	Mesh->AddLocalOffset(FVector(600, 0, 0));
+	const float BeforeRestore = Scene.Camera->GetOwnerClipAmount();
+	Scene.Step();
+	TestTrue(TEXT("表面离远后开始恢复，且不瞬间归零"), Scene.Camera->GetOwnerClipAmount() < BeforeRestore
+		&& Scene.Camera->GetOwnerClipAmount() > 0.0f);
+	TestTrue(TEXT("表面距离随骨骼网格变化，而非固定采用人物中心距离"),
+		Scene.Camera->GetOwnerSurfaceDistance() > Scene.Camera->OwnerClipStartDistance);
+	Scene.Advance(2.0f);
+	TestTrue(TEXT("不再接近身体时完整恢复"), Scene.Camera->GetOwnerClipAmount() < 0.0001f);
+	Mesh->SetRelativeLocation(MeshLocation);
 	Wall->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
 	Scene.Advance(2.0f);
-	TestEqual(TEXT("离开人物后恢复原来 OwnerNoSee 状态"), static_cast<bool>(Mesh->bOwnerNoSee), OriginalOwnerNoSee);
-	Wall->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
-	Wall->SetWorldLocation(FVector(-35, 0, 60));
+	TestTrue(TEXT("无遮挡后范围回到最小值"), FMath::IsNearlyEqual(Scene.Camera->GetOwnerClipRadius(),
+		Scene.Camera->OwnerClipMinRadius, 0.01f));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamShoulderClipLifecycleTest,
+	"DreamSpace.Camera.Shoulder.OwnerClipMaterialIsolationAndCleanup",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamShoulderClipLifecycleTest::RunTest(const FString& Parameters)
+{
+	FShoulderCameraFixture Scene;
+	USkeletalMeshComponent* Mesh = Scene.Character->GetMesh();
+	UMaterialInstanceDynamic* InitialMID = Cast<UMaterialInstanceDynamic>(Mesh->GetMaterial(0));
+	if (!TestNotNull(TEXT("角色材质初始化完成"), InitialMID))
+		return false;
+	UMaterialInterface* Original = InitialMID->Parent;
+	Scene.AddBlocker(FVector(-35, 0, 60), FVector(5, 500, 500));
+	Scene.Advance(1.0f);
+	// 未被当前控制器占有的第二个角色不能共享第一角色的 MID，更不能共享剔除强度。
+	ADreamCharacter* Other = Scene.World->SpawnActor<ADreamCharacter>(FVector(600, 0, 0), FRotator::ZeroRotator);
+	TestTrue(TEXT("其他角色仍使用原材质实例"), Other->GetMesh()->GetMaterial(0) == Original);
+	TestFalse(TEXT("其他角色没有被隐藏"), Other->GetMesh()->bOwnerNoSee);
+
+	Scene.Camera->bEnableOwnerLocalClipping = false;
 	Scene.Step();
-	Scene.Camera->bHideOwnerWhenTooClose = false;
-	Scene.Step();
-	TestEqual(TEXT("关闭近距隐藏立即恢复网格"), static_cast<bool>(Mesh->bOwnerNoSee), OriginalOwnerNoSee);
-	Scene.Camera->bHideOwnerWhenTooClose = true;
+	TestTrue(TEXT("关闭局部剔除立即还原原材质"), Mesh->GetMaterial(0) == Original);
+	TestEqual(TEXT("外部持有的旧 MID 也清零"), InitialMID->K2_GetScalarParameterValue(TEXT("DreamOwnerClipAmount")), 0.0f);
+	Scene.Camera->bEnableOwnerLocalClipping = true;
 	Scene.Step();
 	Scene.Camera->ResetCameraState();
-	TestEqual(TEXT("主动重置清理本组件修改的网格状态"), static_cast<bool>(Mesh->bOwnerNoSee), OriginalOwnerNoSee);
+	TestTrue(TEXT("重置时恢复原材质"), Mesh->GetMaterial(0) == Original);
 	Scene.Step();
 	Scene.Camera->Deactivate();
-	TestEqual(TEXT("停用组件不等待下一帧就恢复网格"), static_cast<bool>(Mesh->bOwnerNoSee), OriginalOwnerNoSee);
+	TestTrue(TEXT("停用时不等待 Tick 即恢复原材质"), Mesh->GetMaterial(0) == Original);
+	Scene.Camera->Activate(true);
+	Scene.Step();
+	Scene.Controller->SetViewTarget(Other);
+	Scene.Step();
+	TestTrue(TEXT("主视角切到其他角色时清理旧角色材质"), Mesh->GetMaterial(0) == Original);
+	Scene.Controller->SetViewTarget(Scene.Character);
+	Scene.Step();
+
+	// 外部换装发生在两帧之间时，清理不能把它覆盖回老材质。
+	UMaterialInterface* Replacement = Mesh->GetMaterial(1);
+	Mesh->SetMaterial(0, Replacement);
+	Scene.Camera->ResetCameraState();
+	TestTrue(TEXT("恢复只修改本组件仍控制的材质槽"), Mesh->GetMaterial(0) == Replacement);
+	Mesh->SetMaterial(0, Original);
+	Scene.Step();
+	Scene.Controller->UnPossess();
+	Scene.Step();
+	TestTrue(TEXT("失去本地控制后清理材质"), Mesh->GetMaterial(0) == Original);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamShoulderClipFrameRateTest,
+	"DreamSpace.Camera.Shoulder.LocalClipFrameRatesAndCapsuleFallback",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamShoulderClipFrameRateTest::RunTest(const FString& Parameters)
+{
+	TArray<float> Amounts;
+	TArray<float> Radii;
+	for (const int32 FPS : {30, 60, 120})
+	{
+		FShoulderCameraFixture Scene;
+		// 去掉网格来验证无物理资产的胶囊表面回退；这也避免把参考姿势尺寸写死进测试。
+		Scene.Character->GetMesh()->SetSkeletalMesh(nullptr);
+		UBoxComponent* Wall = Scene.AddBlocker(FVector(-35, 0, 60), FVector(5, 500, 500));
+		Scene.Advance(0.2f, FPS);
+		Amounts.Add(Scene.Camera->GetOwnerClipAmount());
+		Radii.Add(Scene.Camera->GetOwnerClipRadius());
+		TestEqual(TEXT("位于胶囊表面内部时回退距离为零"), Scene.Camera->GetOwnerSurfaceDistance(), 0.0f);
+		TestFalse(TEXT("没有材质也不能回退到整个人物隐藏"), Scene.Character->GetMesh()->bOwnerNoSee);
+		const float Before = Scene.Camera->GetOwnerClipAmount();
+		Scene.Step(0.0f);
+		TestEqual(TEXT("零时间更新不会改变过渡进度"), Scene.Camera->GetOwnerClipAmount(), Before);
+		Wall->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+		Scene.Advance(2.0f, FPS);
+		TestTrue(TEXT("持续远离后剔除强度稳定归零"), Scene.Camera->GetOwnerClipAmount() < 0.0001f);
+	}
+	TestTrue(TEXT("30/60/120 FPS 相同时间的强度一致"),
+		FMath::IsNearlyEqual(Amounts[0], Amounts[1], 0.0001f) && FMath::IsNearlyEqual(Amounts[1], Amounts[2], 0.0001f));
+	TestTrue(TEXT("30/60/120 FPS 相同时间的范围一致"),
+		FMath::IsNearlyEqual(Radii[0], Radii[1], 0.001f) && FMath::IsNearlyEqual(Radii[1], Radii[2], 0.001f));
 	return true;
 }
 

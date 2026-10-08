@@ -13,6 +13,7 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
+#include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 
 ADreamCharacter::ADreamCharacter()
@@ -49,6 +50,19 @@ ADreamCharacter::ADreamCharacter()
 		if (QuinnMesh.Succeeded())
 		{
 			CharacterMesh->SetSkeletalMesh(QuinnMesh.Object);
+			// 使用独立副本，不修改共享的模板网格/材质。两槽保留 Quinn 的原贴图和颜色继承链。
+			// 相机只为支持 DreamOwnerClip 的材质建立本角色 MID；默认 Amount=0，正常距离完全可见。
+			static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClipBody(
+				TEXT("/Game/DreamCamera/Materials/MI_QuinnOwnerClip_01.MI_QuinnOwnerClip_01"));
+			static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClipDetails(
+				TEXT("/Game/DreamCamera/Materials/MI_QuinnOwnerClip_02.MI_QuinnOwnerClip_02"));
+			if (ClipBody.Succeeded() && ClipDetails.Succeeded())
+			{
+				CharacterMesh->SetMaterial(0, ClipBody.Object);
+				CharacterMesh->SetMaterial(1, ClipDetails.Object);
+			}
+			else
+				UE_LOG(LogTemp, Error, TEXT("缺少局部剔除材质，请运行 Documents/Tools/GenerateOwnerClipMaterials.py；角色保持原材质可见。"));
 		}
 		else
 		{
@@ -83,6 +97,10 @@ ADreamCharacter::ADreamCharacter()
 	FollowCamera->bConstrainAspectRatio = false;
 	// 第一版固定水平 FOV，避免室内避障同时改变距离和视场角而产生额外的缩放感。
 	FollowCamera->FieldOfView = 80.0f;
+	// 只有主跟随视角携带局部剔除标记。材质还核对实际镜头位置/朝向，隔离分屏和其他角色。
+	// UserFlags 第 6 位由本功能保留；其他后处理功能可继续使用其余位。
+	FollowCamera->PostProcessSettings.bOverride_UserFlags = true;
+	FollowCamera->PostProcessSettings.UserFlags |= UDreamShoulderCameraComponent::OwnerClipViewFlag;
 
 	// 手办显示面仍然挂在角色胶囊体右前方，位置、180 度显示朝向和相机映射
 	// 与原有实现保持一致。该组件的 SceneCapture 不参与角色移动输入。
