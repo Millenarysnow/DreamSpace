@@ -1,15 +1,20 @@
 #include "DreamShoulderCameraComponent.h"
 
+#include "DreamSceneCapturePresentationComponent.h"
+#include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Math/RotationMatrix.h"
+#include "SceneView.h"
 
 namespace
 {
@@ -86,6 +91,104 @@ FTransform UDreamShoulderCameraComponent::GetIdealCameraTransform(float InArmLen
 		Pivot + Rotation.RotateVector(SocketOffset - FVector(FMath::Max(InArmLength, 0.0f), 0.0f, 0.0f)));
 }
 
+bool UDreamShoulderCameraComponent::BeginMiniatureFocus(
+	UDreamSceneCapturePresentationComponent* Miniature, const FMinimalViewInfo& PlayerPOV)
+{
+	if (!IsValid(Miniature) || !Miniature->IsInspecting() || Miniature->GetOwner() != GetOwner() || !IsActive())
+		return false;
+	const FVector Forward = (Miniature->GetDisplayCenter() - PlayerPOV.Location).GetSafeNormal();
+	if (Forward.IsNearlyZero())
+		return false;
+	const FQuat Rotation = FRotationMatrix::MakeFromXZ(
+		Forward, PlayerPOV.Rotation.RotateVector(FVector::UpVector)).ToQuat();
+	MiniatureFocusLocalRotation = GetOwner()->GetActorQuat().Inverse() * Rotation;
+	MiniatureFocusTarget = Miniature;
+	// 不等待下一次 Tick：Tab 输入发生后，本帧的主视口和光标射线即可使用居中后的真实相机。
+	UpdateMiniatureFocus(bDoCollisionTest, 0.0f);
+	return true;
+}
+
+void UDreamShoulderCameraComponent::EndMiniatureFocus()
+{
+	if (MiniatureFocusTarget.IsExplicitlyNull())
+		return;
+	MiniatureFocusTarget.Reset();
+	ResetCameraState();
+	if (IsRegistered() && IsActive())
+		UpdateDesiredArmLocation(bDoCollisionTest, false, false, 0.0f);
+}
+
+bool UDreamShoulderCameraComponent::UpdateMiniatureFocus(bool bDoTrace, float DeltaTime)
+{
+	UDreamSceneCapturePresentationComponent* Miniature = MiniatureFocusTarget.Get();
+	if (!Miniature || !Miniature->IsInspecting() || !Miniature->IsPresentationActive())
+	{
+		if (!MiniatureFocusTarget.IsExplicitlyNull())
+		{
+			// 弱引用失效也表示刚退出观察。先清理缓存，再由当前外层更新重建探索 Socket，
+			// 不递归调用相机更新，也不把观察期间未刷新的高度/碰撞历史继续带回探索。
+			MiniatureFocusTarget.Reset();
+			ResetCameraState();
+		}
+		return false;
+	}
+
+	UCameraComponent* Camera = GetOwner()->FindComponentByClass<UCameraComponent>();
+	const ACharacter* Character = Cast<ACharacter>(GetOwner());
+	const APlayerController* Controller = Character ? Cast<APlayerController>(Character->GetController()) : nullptr;
+	int32 Width = 0, Height = 0;
+	if (Controller)
+		Controller->GetViewportSize(Width, Height);
+	const ULocalPlayer* LocalPlayer = Controller ? Controller->GetLocalPlayer() : nullptr;
+	if (Width > 0 && Height > 0 && LocalPlayer)
+	{
+		// 分屏时按该玩家实际占用的子视口计算，不能用整个游戏窗口的宽高比。
+		Width = FMath::Max(1, FMath::RoundToInt(Width * LocalPlayer->Size.X));
+		Height = FMath::Max(1, FMath::RoundToInt(Height * LocalPlayer->Size.Y));
+	}
+	if (Width <= 0 || Height <= 0)
+	{
+		Width = 1920;
+		Height = FMath::Max(1, FMath::RoundToInt(Width / FMath::Max(Camera ? Camera->AspectRatio : 16.0f / 9.0f, 0.1f)));
+	}
+	FMinimalViewInfo View;
+	if (Camera)
+		Camera->GetCameraView(0.0f, View);
+	FSceneViewProjectionData Projection;
+	const FIntRect ViewRect(0, 0, Width, Height);
+	Projection.SetViewRectangle(ViewRect);
+	// 由引擎处理 MaintainX/MaintainY/MajorAxisFOV 和相机宽高比配置，避免复制投影公式。
+	// 投影矩阵两条对角线分别为水平/垂直半张角的 cot，乘半边长就是各方向的最小取景距离。
+	FMinimalViewInfo::CalculateProjectionMatrixGivenViewRectangle(View,
+		LocalPlayer ? LocalPlayer->AspectRatioAxisConstraint.GetValue() : AspectRatio_MaintainXFOV, ViewRect, Projection);
+	const FVector2D DisplaySize = Miniature->GetDisplaySize();
+	const float FramingDistance = 0.5f * FMath::Max(
+		DisplaySize.X * Projection.ProjectionMatrix.M[0][0], DisplaySize.Y * Projection.ProjectionMatrix.M[1][1]);
+	const float Distance = FMath::Max(ProbeSize + CollisionSafetyMargin,
+		FramingDistance / FMath::Clamp(MiniatureScreenFill, 0.1f, 0.9f));
+	const FVector Center = Miniature->GetDisplayCenter();
+	const FQuat Rotation = (GetOwner()->GetActorQuat() * MiniatureFocusLocalRotation).GetNormalized();
+	const FVector Backward = -Rotation.GetForwardVector();
+	UnfixedCameraPosition = Center + Backward * Distance;
+	FCameraSweep Sweep;
+	Sweep.SafeDistance = Distance;
+	if (bDoTrace)
+		Sweep = SweepCamera(Center, UnfixedCameraPosition, ProbeSize);
+	const FVector Actual = Center + Backward * Sweep.SafeDistance;
+	bIsCameraFixed = !Actual.Equals(UnfixedCameraPosition, 0.1f);
+
+	// 只沿中心视线收近，碰撞前后光轴都穿过显示面中心；不存在越肩偏移造成的偏心。
+	// 探索参数和历史不在这里修改，退出时由 ResetCameraState 建立新的探索参考。
+	const FTransform RelativeCamera = FTransform(Rotation, Actual).GetRelativeTransform(GetComponentTransform());
+	RelativeSocketLocation = RelativeCamera.GetLocation();
+	RelativeSocketRotation = RelativeCamera.GetRotation();
+	UpdateChildTransforms();
+	UpdateOwnerClipping(Actual, Rotation.Rotator(), DeltaTime);
+	if (bDreamShoulderCameraDebug)
+		DrawCameraDebug(Center, UnfixedCameraPosition, Actual, Sweep);
+	return true;
+}
+
 void UDreamShoulderCameraComponent::UpdateDesiredArmLocation(
 	bool bDoTrace, bool bDoLocationLag, bool bDoRotationLag, float DeltaTime)
 {
@@ -93,6 +196,8 @@ void UDreamShoulderCameraComponent::UpdateDesiredArmLocation(
 	// 仍保留基类虚函数签名，使 SpringArm 的注册、Tick 和 Socket 查询能继续使用本组件。
 	(void)bDoRotationLag;
 	const float Step = FMath::Max(DeltaTime, 0.0f);
+	if (UpdateMiniatureFocus(bDoTrace, Step))
+		return;
 	const FVector Anchor = GetComponentLocation() + TargetOffset;
 	const FVector OwnerLocation = GetOwner() ? GetOwner()->GetActorLocation() : Anchor;
 	const FVector Up = GetGravityUp();
@@ -375,12 +480,14 @@ void UDreamShoulderCameraComponent::ResetCameraState()
 
 void UDreamShoulderCameraComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	MiniatureFocusTarget.Reset();
 	RestoreOwnerClipMaterials();
 	Super::EndPlay(EndPlayReason);
 }
 
 void UDreamShoulderCameraComponent::OnUnregister()
 {
+	MiniatureFocusTarget.Reset();
 	ResetCameraState();
 	Super::OnUnregister();
 }
@@ -388,6 +495,7 @@ void UDreamShoulderCameraComponent::OnUnregister()
 void UDreamShoulderCameraComponent::Deactivate()
 {
 	// 停用会关闭 Tick，不能等下一帧再清理材质；切镜头时主动恢复原材质并重建跟随历史。
+	MiniatureFocusTarget.Reset();
 	ResetCameraState();
 	Super::Deactivate();
 }

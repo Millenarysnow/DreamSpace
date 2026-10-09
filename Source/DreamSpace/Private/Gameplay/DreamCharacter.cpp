@@ -248,6 +248,11 @@ void ADreamCharacter::DoLook(float Yaw, float Pitch)
 
 void ADreamCharacter::DoJumpStart()
 {
+	// Tab 聚焦期间保持手持显示面稳定，避免跳跃输入绕过控制器的移动忽略计数。
+	// 仍允许已经发生的下落与平台搬运，退出观察后立即恢复原来的跳跃入口。
+	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
+		if (DreamController->IsMiniatureInteractionMode())
+			return;
 	Jump();
 }
 

@@ -285,6 +285,31 @@ public:
 	UPROPERTY(EditAnywhere, Category = "场景缩略图|显示")
 	bool bRotateDisplayImage180Degrees = true;
 
+	/**
+	 * 居中观察时，右键拖动每个屏幕像素对应的旋转角度，单位为度/像素。
+	 * 使用原始光标位移而非鼠标视角轴值，也不再乘 DeltaTime，保证慢拖、快拖和不同帧率一致。
+	 * 水平与垂直输入分别绕捕获镜头当前的上轴、右轴旋转；四元数允许越过顶部/底部自由翻转。
+	 */
+	UPROPERTY(EditAnywhere, Category = "场景缩略图|居中观察", meta = (ClampMin = "0.01", UIMax = "1.0"))
+	float InspectionRotationDegreesPerPixel = 0.25f;
+
+	/**
+	 * 开始居中观察：保存当前捕获的角度、距离和投影，随后由右键输入独立控制展示角度。
+	 * 主相机的居中与避障仍由 DreamShoulderCamera 负责；这里仅移动捕获镜头，不旋转真实建筑。
+	 * 只有显示资源已经启用时才返回 true，防止 Tab 聚焦一个不存在或被隐藏的手办。
+	 */
+	bool BeginInspection();
+	/** 结束观察并恢复跟随探索相机的取景方式；再次进入时从当时的展示角度重新开始。 */
+	void EndInspection();
+	/** 接收屏幕像素增量，更新围绕场景锚点的捕获姿态；停止输入后保持最后的展示角度。 */
+	void RotateInspection(const FVector2D& PointerDelta);
+	/** 手办是否处于独立观察状态，供控制器和主相机统一处理生命周期。 */
+	bool IsInspecting() const { return bInspectionActive; }
+	/** 显示面的世界中心包含 DisplayRelativeTransform 偏移，不能使用组件原点代替。 */
+	FVector GetDisplayCenter() const;
+	/** 使用实际显示网格的局部包围盒与世界缩放求宽高，包含挂点/显示配置的缩放。 */
+	FVector2D GetDisplaySize() const;
+
 	/** 立即重建黑名单、更新相机姿态并请求一次捕获；调试或运行时改变配置时可调用。 */
 	UFUNCTION(BlueprintCallable, Category = "场景缩略图")
 	void RefreshCaptureNow();
@@ -396,6 +421,15 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> DisplayMaterialInstance;
 
 	bool bPresentationActive = false;
+	/**
+	 * 观察状态只属于本次 Tab 会话，不改写编辑器配置。
+	 * 捕获镜头绕真实场景锚点公转，面片仍朝向玩家主镜头，两者在观察模式下独立转向。
+	 */
+	bool bInspectionActive = false;
+	FQuat InspectionCaptureRotation = FQuat::Identity;
+	float InspectionCaptureDistance = 0.0f;
+	float InspectionCaptureFOV = 60.0f;
+	float InspectionCaptureOrthoWidth = 80.0f;
 
 	void CreatePresentationResources();
 	void DestroyPresentationResources();

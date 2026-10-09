@@ -7,6 +7,7 @@
 #include "DreamPlayerController.h"
 #include "DreamSceneCaptureAnchor.h"
 #include "DreamSceneCapturePresentationComponent.h"
+#include "DreamShoulderCameraComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
@@ -382,10 +383,24 @@ bool FDreamDragControllerLifecycleTest::RunTest(const FString& Parameters)
 {
 	FDragFixture Scene;
 	UDreamDraggableComponent* Drag = AddInteraction<UDreamDraggableComponent>(Scene.Mover);
-	APawn* Pawn = Scene.World->SpawnActor<APawn>();
+	FActorSpawnParameters Spawn;
+	Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ADreamCharacter* Pawn = Scene.World->SpawnActor<ADreamCharacter>(FVector::ZeroVector, FRotator::ZeroRotator, Spawn);
 	ADreamPlayerController* Controller = Scene.World->SpawnActor<ADreamPlayerController>();
 	Controller->Player = NewObject<ULocalPlayer>(GEngine);
+	Scene.World->AddController(Controller);
+	Controller->SpawnPlayerCameraManager();
 	Controller->Possess(Pawn);
+	Controller->SetViewTarget(Pawn);
+	// Tab 现在会建立真实的显示面聚焦会话；隔离世界没有正常 BeginPlay，显式补齐相机与捕获资源。
+	// 使用原生角色而非普通 APawn，才能验证左键/E 两种输入来源和观察锁之间的实际关系。
+	UDreamShoulderCameraComponent* Camera = CastChecked<UDreamShoulderCameraComponent>(Pawn->CameraBoom);
+	Camera->Activate(true);
+	Camera->TickComponent(0.0f, LEVELTICK_All, nullptr);
+	Scene.World->SpawnActor<ADreamSceneCaptureAnchor>();
+	Pawn->SceneMiniature->RenderTargetWidth = 256;
+	Pawn->SceneMiniature->RenderTargetHeight = 256;
+	Pawn->SceneMiniature->BeginPlay();
 	Controller->SetIgnoreLookInput(true);
 	Controller->DispatchInteraction(Scene.Mover, nullptr, FVector(0, 0, 500), FVector::DownVector);
 	TestTrue(TEXT("控制器分发会进入持续拖动"), Controller->IsDraggingInteraction());
@@ -399,13 +414,15 @@ bool FDreamDragControllerLifecycleTest::RunTest(const FString& Parameters)
 	Controller->SetIgnoreLookInput(false);
 	Controller->DispatchInteraction(Scene.Mover, nullptr, FVector(0, 0, 500), FVector::DownVector);
 	Controller->SetMiniatureInteractionMode(true);
-	TestFalse(TEXT("切换输入空间立即结束拖动并恢复输入"),
-		Drag->IsDragging() || Controller->IsMoveInputIgnored() || Controller->IsLookInputIgnored());
+	TestFalse(TEXT("切换输入空间立即结束旧的 E 拖动"), Drag->IsDragging() || Controller->IsDraggingInteraction());
+	TestTrue(TEXT("Tab 聚焦独立保持移动和视角锁"), Controller->IsMiniatureInteractionMode()
+		&& Controller->IsMoveInputIgnored() && Controller->IsLookInputIgnored());
 	Controller->DispatchInteraction(Scene.Mover, nullptr, FVector(0, 0, 500), FVector::DownVector);
 	Controller->EndWorldDrag();
 	TestTrue(TEXT("E 松开不会结束手办左键拖动"), Drag->IsDragging());
 	Controller->SetMiniatureInteractionMode(false);
-	TestFalse(TEXT("从手办切回探索同样清理会话"), Drag->IsDragging() || Controller->IsDraggingInteraction());
+	TestFalse(TEXT("从手办切回探索同样清理会话与两种输入锁"), Drag->IsDragging() || Controller->IsDraggingInteraction()
+		|| Controller->IsMoveInputIgnored() || Controller->IsLookInputIgnored());
 	Controller->DispatchInteraction(Scene.Mover, nullptr, FVector(0, 0, 500), FVector::DownVector);
 	Drag->Deactivate();
 	TestFalse(TEXT("停用组件不等待 Tick 即释放操作者"), Drag->IsDragging());

@@ -7,6 +7,8 @@
 class USkeletalMeshComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
+class UDreamSceneCapturePresentationComponent;
+struct FMinimalViewInfo;
 
 /**
  * 探索模式的越肩相机：保留 SpringArm 的挂接接口，独立处理室内避障的时间连续性。
@@ -37,6 +39,23 @@ public:
 
 	/** 缩放后的理想臂长，尚未经过碰撞收近；与直接跳变的 TargetArmLength 区分。 */
 	float GetSmoothedArmLength() const { return SmoothedArmLength; }
+
+	/**
+	 * Tab 观察时将同一台 FollowCamera 对准显示面中心，不改写探索用的臂长、肩位或控制旋转。
+	 * 进入时保留相机看向手办的方向，并保存为角色局部姿态，平台翻转重力时随角色一起搬运。
+	 * 相机位置仍通过本组件的 Camera 通道扫掠和 Socket 发布，人物局部剔除也使用最终镜头。
+	 */
+	bool BeginMiniatureFocus(UDreamSceneCapturePresentationComponent* Miniature, const FMinimalViewInfo& PlayerPOV);
+	/** 解除聚焦并重建探索相机历史，防止用手办观察距离作为越肩相机的碰撞恢复起点。 */
+	void EndMiniatureFocus();
+	bool IsMiniatureFocused() const { return MiniatureFocusTarget.IsValid(); }
+
+	/**
+	 * 手办在视口较紧的一边占据的比例。默认 0.65，四周留出空间供左键把物品拖出显示面。
+	 * 距离同时考虑平面宽高、主相机水平 FOV 和视口宽高比，横屏/竖屏不会裁掉显示面的边缘。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|手办观察", meta = (ClampMin = "0.1", ClampMax = "0.9"))
+	float MiniatureScreenFill = 0.65f;
 
 	/** 当前肩位比例，1 表示完整右肩，0 表示回到中轴；供调试与运行时观察使用。 */
 	float GetShoulderWeight() const { return ShoulderWeight; }
@@ -141,6 +160,11 @@ protected:
 	virtual void UpdateDesiredArmLocation(bool bDoTrace, bool bDoLocationLag, bool bDoRotationLag, float DeltaTime) override;
 
 private:
+	/** 手办使用弱引用；角色/组件销毁后自动失效，不延长被观察对象的生命周期。 */
+	TWeakObjectPtr<UDreamSceneCapturePresentationComponent> MiniatureFocusTarget;
+	FQuat MiniatureFocusLocalRotation = FQuat::Identity;
+	/** 独立处理聚焦构图，但复用现有相机扫掠、Socket 和材质更新入口。 */
+	bool UpdateMiniatureFocus(bool bDoTrace, float DeltaTime);
 	/** 一次真实球扫掠的结果，同时保留命中信息，供预警规则与调试显示复用。 */
 	struct FCameraSweep
 	{

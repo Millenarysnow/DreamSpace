@@ -7,6 +7,7 @@
 #include "DreamPlayerController.h"
 #include "DreamSceneCaptureAnchor.h"
 #include "DreamSceneCapturePresentationComponent.h"
+#include "DreamShoulderCameraComponent.h"
 #include "Components/BoxComponent.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -234,16 +235,28 @@ bool FDreamMiniatureExtractionControllerTest::RunTest(const FString& Parameters)
 			Capture = Candidate;
 	if (!TestNotNull(TEXT("真实表现层生成显示面"), Display) || !TestNotNull(TEXT("真实表现层生成捕获相机"), Capture))
 		return false;
-	Capture->SetActorLocationAndRotation(FVector(10000, 0, 1000), FRotator::ZeroRotator);
-	Display->SetWorldTransform(
-		FTransform(FRotationMatrix::MakeFromXZ(FVector::RightVector, -FVector::ForwardVector).ToQuat(),
-			FVector(0, 300, 100), FVector(0.8)));
-	const FVector Camera = Display->GetComponentLocation() - FVector(350, 0, 0);
-	const FVector CenterRay = Display->GetComponentLocation() - Camera;
 	ADreamPlayerController* Controller = Scene.World->SpawnActor<ADreamPlayerController>();
 	Controller->Player = NewObject<ULocalPlayer>(GEngine);
+	Scene.World->AddController(Controller);
+	Controller->SpawnPlayerCameraManager();
 	Controller->Possess(Character);
+	Controller->SetViewTarget(Character);
+	UDreamShoulderCameraComponent* ShoulderCamera = CastChecked<UDreamShoulderCameraComponent>(Character->CameraBoom);
+	ShoulderCamera->Activate(true);
+	ShoulderCamera->TickComponent(0.0f, LEVELTICK_All, nullptr);
+	// Tab 现在会真正改变主相机与显示姿态。固定测试投影必须在进入模式后注入，
+	// 不能被居中操作覆盖；测试仍走正常控制器取出入口，不绕过可见面片求交。
+	auto ConfigureProjection = [&]()
+	{
+		Capture->SetActorLocationAndRotation(FVector(10000, 0, 1000), FRotator::ZeroRotator);
+		Display->SetWorldTransform(
+			FTransform(FRotationMatrix::MakeFromXZ(FVector::RightVector, -FVector::ForwardVector).ToQuat(),
+				FVector(0, 300, 100), FVector(0.8)));
+	};
 	Controller->SetMiniatureInteractionMode(true);
+	ConfigureProjection();
+	const FVector Camera = Display->GetComponentLocation() - FVector(350, 0, 0);
+	const FVector CenterRay = Display->GetComponentLocation() - Camera;
 	Controller->SetIgnoreLookInput(true);
 	UDreamDraggableComponent* OtherDrag = AddExtractionTestComponent<UDreamDraggableComponent>(Scene.Source);
 	Controller->InteractWithMiniatureRay(Camera, CenterRay);
@@ -257,9 +270,9 @@ bool FDreamMiniatureExtractionControllerTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("鼠标越过手办边缘后仍能驱动预览"), Controller->UpdateMiniatureExtractRay(Camera, Outside - Camera));
 	TestTrue(TEXT("预览位于玩家旁边，而非捕获世界的远处模型位置"), Preview->GetActorLocation().X < 1000.0);
 	Controller->CancelMiniatureDrag();
-	TestFalse(TEXT("输入 Canceled 不提交，并释放自身移动锁"), IsValid(Preview) || Scene.Source->IsHidden() ||
-																  Controller->IsDraggingInteraction() ||
-																  Controller->IsMoveInputIgnored());
+	TestFalse(TEXT("输入 Canceled 不提交，并结束取出会话"), IsValid(Preview) || Scene.Source->IsHidden() ||
+		Controller->IsDraggingInteraction());
+	TestTrue(TEXT("取消取出后仍保持 Tab 居中观察的移动锁"), Controller->IsMoveInputIgnored());
 	TestTrue(TEXT("取消后保留其他系统的视角锁"), Controller->IsLookInputIgnored());
 	Controller->SetIgnoreLookInput(false);
 
@@ -270,16 +283,21 @@ bool FDreamMiniatureExtractionControllerTest::RunTest(const FString& Parameters)
 		Scene.Source->IsHidden() || Controller->IsDraggingInteraction() || Controller->IsLookInputIgnored() ||
 			Controller->IsMoveInputIgnored());
 	Controller->SetMiniatureInteractionMode(true);
+	ConfigureProjection();
 	Controller->InteractWithMiniatureRay(Camera, CenterRay);
 	Controller->UpdateMiniatureExtractRay(Camera, Outside - Camera);
 	Controller->UnPossess();
 	TestFalse(TEXT("失去角色时取消而非提交"), Scene.Source->IsHidden() || Controller->IsDraggingInteraction());
 	Controller->Possess(Character);
+	// 失去角色现在会同时退出 Tab，重新控制后需重新进入观察，旧会话不会续接。
+	Controller->SetMiniatureInteractionMode(true);
+	ConfigureProjection();
 	Controller->InteractWithMiniatureRay(Camera, CenterRay);
 	Controller->UpdateMiniatureExtractRay(Camera, Outside - Camera);
 	Preview = Scene.Extract->GetPreviewItem();
 	// 无原生游戏视口的自动化注入最后一帧视线，再走正常松开的提交入口。
 	Controller->EndActiveDrag(true);
+	Controller->SetMiniatureInteractionMode(false);
 	TestTrue(TEXT("正常提交后只保留物理掉落物并释放控制器输入锁"),
 		!IsValid(Scene.Source) && IsValid(Preview) &&
 			Preview->FindComponentByClass<USphereComponent>()->IsSimulatingPhysics() &&

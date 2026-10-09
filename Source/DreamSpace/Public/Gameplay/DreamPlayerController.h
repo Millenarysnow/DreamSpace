@@ -6,6 +6,8 @@ class UInputAction;
 class UActorComponent;
 class UDreamDragInteractionComponent;
 class UDreamMiniatureExtractableComponent;
+class UDreamSceneCapturePresentationComponent;
+class UDreamShoulderCameraComponent;
 class UPrimitiveComponent;
 struct FInputActionValue;
 
@@ -48,7 +50,7 @@ private:
 	TArray<TObjectPtr<UInputMappingContext>> AppliedDefaultMappingContexts;
 
 	/**
-	 * 项目额外交互使用的运行时映射：E、Tab、手办左键和滚轮缩放。
+	 * 项目额外交互使用的运行时映射：E、Tab、手办左键/右键和滚轮缩放。
 	 * 官方模板负责移动/视角/跳跃，这个上下文只承载 DreamSpace 专属输入。
 	 */
 	UPROPERTY()
@@ -87,9 +89,22 @@ private:
 	void EndMiniatureDrag();
 	/** 输入取消与正常松开分开处理，失焦/上下文移除不能提交取出。 */
 	void CancelMiniatureDrag();
-	/** Tab 切换光标模式：进入时暂停鼠标转视角，左键改为点击手办画面。 */
+	/** Tab 切换居中观察：进入时锁住探索输入，左键操作机关，右键旋转手办展示角度。 */
 	void ToggleMiniatureInteractionMode();
 	void SetMiniatureInteractionMode(bool bEnabled);
+	/** 右键必须从可见显示面内开始；抓取后允许光标越过面片边缘，松开即停止旋转。 */
+	void BeginMiniatureRotation();
+	bool BeginMiniatureRotationRay(const FVector& ViewOrigin, const FVector& ViewDirection);
+	/** 每帧使用光标像素位移，失焦、丢失右键、目标停用或更换 Pawn 时立即结束会话。 */
+	void UpdateMiniatureRotation();
+	void EndMiniatureRotation();
+	/** 记录本次观察的组件，退出时清理旧角色，而不是误操作刚被 Possess 的新角色。 */
+	TWeakObjectPtr<UDreamSceneCapturePresentationComponent> InspectedMiniature;
+	TWeakObjectPtr<UDreamShoulderCameraComponent> MiniatureFocusCamera;
+	FVector2D LastMiniatureRotationMousePosition = FVector2D::ZeroVector;
+	bool bRotatingMiniature = false;
+	/** Tab 会话的输入锁与左键机关拖动的输入锁独立计数，退出时各自只释放自己添加的一次。 */
+	bool bMiniatureInputLocked = false;
 	/** 左键触发：实际相机射线命中显示面，再映射成 SceneCapture 的世界射线。 */
 	void InteractWithMiniature();
 	/** 与鼠标输入解耦的完整拾取路径，自动化测试可直接提供一条已知的实际视线。 */
@@ -99,6 +114,9 @@ private:
 	friend class FDreamMiniatureDragMappingTest;
 	friend class FDreamMiniatureExtractionControllerTest;
 	friend class FDreamKeyPickupControllerTest;
+	friend class FDreamMiniatureFocusLifecycleTest;
+	friend class FDreamMiniatureInspectionRotationTest;
+	friend class FDreamMiniatureGameplayRenderTest;
 	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */

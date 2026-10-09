@@ -11,6 +11,8 @@
 #include "DreamMiniatureExtractableComponent.h"
 #include "DreamPlayerController.h"
 #include "DreamSceneCapturePresentationComponent.h"
+#include "DreamSceneCaptureAnchor.h"
+#include "DreamShoulderCameraComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/StaticMesh.h"
@@ -58,9 +60,19 @@ struct FKeyPickupFixture
 		Character = World->SpawnActor<ADreamCharacter>(FVector::ZeroVector, FRotator::ZeroRotator, Spawn);
 		Controller = World->SpawnActor<ADreamPlayerController>();
 		Controller->Player = NewObject<ULocalPlayer>(GEngine);
+		World->AddController(Controller);
 		// 与 HUD 相同，隔离世界需显式补齐 PostInitializeComponents 通常创建的相机管理器。
 		Controller->SpawnPlayerCameraManager();
 		Controller->Possess(Character);
+		Controller->SetViewTarget(Character);
+		// Tab 观察要求真实显示资源与已激活相机，瞬时测试补齐游戏 BeginPlay 通常完成的工作。
+		UDreamShoulderCameraComponent* Camera = CastChecked<UDreamShoulderCameraComponent>(Character->CameraBoom);
+		Camera->Activate(true);
+		Camera->TickComponent(0.0f, LEVELTICK_All, nullptr);
+		World->SpawnActor<ADreamSceneCaptureAnchor>();
+		Character->SceneMiniature->RenderTargetWidth = 256;
+		Character->SceneMiniature->RenderTargetHeight = 256;
+		Character->SceneMiniature->BeginPlay();
 		// 隔离世界没有客户端 RPC 生命周期，直接执行引擎创建 HUD 的实现，仍通过 GetHUD 验证角色通知。
 		Controller->ClientSetHUD_Implementation(ADreamHUD::StaticClass());
 		HUD = CastChecked<ADreamHUD>(Controller->GetHUD());
@@ -132,6 +144,8 @@ bool FDreamKeyPickupControllerTest::RunTest(const FString& Parameters)
 	Scene.Controller->Interact();
 	TestTrue(TEXT("手办模式按 E 不会领取世界钥匙"), IsValid(Key) && !Scene.Character->bHasKey);
 	Scene.Controller->SetMiniatureInteractionMode(false);
+	// 居中退出恢复探索相机，随后重新注入测试瞄准点，让墙体遮挡断言只验证钥匙拾取规则。
+	Scene.AimAt(Key);
 	// 在相机与钥匙之间放真实阻挡盒，验证拾取不能穿墙。
 	AActor* Wall = Scene.World->SpawnActor<AActor>();
 	UBoxComponent* Box = NewObject<UBoxComponent>(Wall);

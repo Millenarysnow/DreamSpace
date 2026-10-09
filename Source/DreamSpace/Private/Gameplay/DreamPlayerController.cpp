@@ -1,6 +1,8 @@
 #include "DreamPlayerController.h"
 #include "DreamCharacter.h"
 #include "DreamSceneCapturePresentationComponent.h"
+#include "DreamShoulderCameraComponent.h"
+#include "Camera/CameraComponent.h"
 #include "DreamInteractableInterface.h"
 #include "DreamDragInteractionComponent.h"
 #include "DreamMiniatureExtractableComponent.h"
@@ -71,7 +73,7 @@ void ADreamPlayerController::ReceivedPlayer()
 void ADreamPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
 	EndActiveDrag();
-	if (bMiniatureInteractionMode && IsLocalController())
+	if (bMiniatureInteractionMode)
 		SetMiniatureInteractionMode(false);
 
 	// 退出时移除项目交互和官方模板映射，避免 PIE 的下一次会话继承旧上下文。
@@ -134,6 +136,10 @@ void ADreamPlayerController::SetupInputComponent()
 		UInputAction* MiniatureAction = Button(EKeys::LeftMouseButton, &ADreamPlayerController::InteractWithMiniature);
 		Input->BindAction(MiniatureAction, ETriggerEvent::Completed, this, &ADreamPlayerController::EndMiniatureDrag);
 		Input->BindAction(MiniatureAction, ETriggerEvent::Canceled, this, &ADreamPlayerController::CancelMiniatureDrag);
+		// 右键只控制展示角度，与左键的真实机关交互分开；Completed/Canceled 共用无提交的清理入口。
+		UInputAction* RotateMiniatureAction = Button(EKeys::RightMouseButton, &ADreamPlayerController::BeginMiniatureRotation);
+		Input->BindAction(RotateMiniatureAction, ETriggerEvent::Completed, this, &ADreamPlayerController::EndMiniatureRotation);
+		Input->BindAction(RotateMiniatureAction, ETriggerEvent::Canceled, this, &ADreamPlayerController::EndMiniatureRotation);
 
 		// 滚轮缩放不属于官方模板输入，因此保留一个本地 Axis1D 动作。
 		auto* ZoomAction = NewObject<UInputAction>(this);
@@ -173,7 +179,7 @@ void ADreamPlayerController::ApplyInputMapping()
 			Input->AddMappingContext(Mapping, 1);
 			bMappingApplied = true;
 			UE_LOG(LogDreamSpace, Verbose,
-				TEXT("已安装 DreamSpace 交互输入映射（E、Tab、手办左键和滚轮）。"));
+				TEXT("已安装 DreamSpace 交互输入映射（E、Tab、手办左键/右键和滚轮）。"));
 		}
 	}
 }
@@ -182,7 +188,7 @@ void ADreamPlayerController::UpdateRotation(float Delta)
 {
 	// 平台可能在本帧主动旋转玩家重力和视角；拖动期间保留该完整姿态，
 	// 不再用鼠标或重力相对欧拉角覆盖它，以免拖动射线和手办画面来回偏移。
-	if (IsDraggingInteraction())
+	if (bMiniatureInteractionMode || IsDraggingInteraction())
 		return;
 	// 在自定义重力场景中，把控制旋转转换到重力相对空间再叠加输入，保证相机姿态始终贴合当前重力方向。
 	auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
@@ -199,7 +205,7 @@ void ADreamPlayerController::UpdateRotation(float Delta)
 void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
 {
 	// 拖动时保持相机投影稳定，防止滚轮缩放被误解成物体移动。
-	if (IsDraggingInteraction())
+	if (bMiniatureInteractionMode || IsDraggingInteraction())
 		return;
 	const float WheelDelta = Value.Get<float>();
 	if (FMath::IsNearlyZero(WheelDelta))
@@ -270,27 +276,138 @@ void ADreamPlayerController::ToggleMiniatureInteractionMode()
 
 void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled)
 {
-	if (bMiniatureInteractionMode == bEnabled || !IsLocalController())
+	if (bMiniatureInteractionMode == bEnabled || (bEnabled && !IsLocalController()))
 		return;
 	// 模式切换会改变射线所属空间；先结束当前拖动，不能把主视口输入续接到捕获相机。
 	EndActiveDrag();
-	bMiniatureInteractionMode = bEnabled;
-	bShowMouseCursor = bEnabled;
+	EndMiniatureRotation();
 	if (bEnabled)
 	{
-		// GameAndUI 仍把 Enhanced Input 的 Tab/左键交给控制器，同时允许鼠标
+		if (ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn()))
+		{
+			UDreamSceneCapturePresentationComponent* Miniature = ControlledCharacter->SceneMiniature;
+			UDreamShoulderCameraComponent* Camera = Cast<UDreamShoulderCameraComponent>(ControlledCharacter->CameraBoom);
+			if (!Miniature || !Camera || !ControlledCharacter->FollowCamera || !Miniature->BeginInspection())
+				return;
+			FMinimalViewInfo POV;
+			ControlledCharacter->FollowCamera->GetCameraView(0.0f, POV);
+			if (!Camera->BeginMiniatureFocus(Miniature, POV))
+			{
+				Miniature->EndInspection();
+				return;
+			}
+			InspectedMiniature = Miniature;
+			MiniatureFocusCamera = Camera;
+			// 观察时停止玩家主动移动，避免人物转身让手中显示面偏离构图。
+			// 不禁用 CharacterMovement：重力、落地和平台搬运仍按原来的规则运行。
+			SetIgnoreLookInput(true);
+			SetIgnoreMoveInput(true);
+			bMiniatureInputLocked = true;
+			Miniature->RefreshCaptureNow();
+		}
+		else
+		{
+			// 重生、观战或切换 Pawn 的空档可能仍收到 Tab 输入。没有原生角色就无法建立
+			// 显示面与相机的观察会话，必须保持探索状态，不能只打开光标并冻结控制旋转。
+			return;
+		}
+	}
+	else
+	{
+		// 先恢复 FollowCamera 的探索 Socket，再恢复窗口捕获，避免捕获使用仍在近处的聚焦相机。
+		if (UDreamShoulderCameraComponent* Camera = MiniatureFocusCamera.Get())
+			Camera->EndMiniatureFocus();
+		if (UDreamSceneCapturePresentationComponent* Miniature = InspectedMiniature.Get())
+			Miniature->EndInspection();
+		MiniatureFocusCamera.Reset();
+		InspectedMiniature.Reset();
+		if (bMiniatureInputLocked)
+		{
+			SetIgnoreLookInput(false);
+			SetIgnoreMoveInput(false);
+			bMiniatureInputLocked = false;
+		}
+	}
+	bMiniatureInteractionMode = bEnabled;
+	bShowMouseCursor = bEnabled;
+	if (bEnabled && IsLocalController())
+	{
+		// GameAndUI 仍把 Enhanced Input 的 Tab/左键/右键交给控制器，同时允许鼠标
 		// 自由移动到手办画面任意位置；没有聚焦 Widget，故无需依赖 UMG。
 		FInputModeGameAndUI InputMode;
 		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
 		InputMode.SetHideCursorDuringCapture(false);
 		SetInputMode(InputMode);
 	}
-	else
+	else if (IsLocalController())
 	{
 		// 恢复原来的第三人称鼠标捕获方式；Look 的保护条件随状态一起解除。
 		SetInputMode(FInputModeGameOnly());
 	}
 	UE_LOG(LogDreamSpace, Log, TEXT("手办交互模式：%s"), bEnabled ? TEXT("开启") : TEXT("关闭"));
+}
+
+void ADreamPlayerController::BeginMiniatureRotation()
+{
+	float MouseX = 0.0f, MouseY = 0.0f;
+	FVector Origin, Direction;
+	if (GetMousePosition(MouseX, MouseY) && DeprojectMousePositionToWorld(Origin, Direction)
+		&& BeginMiniatureRotationRay(Origin, Direction))
+		LastMiniatureRotationMousePosition = FVector2D(MouseX, MouseY);
+}
+
+bool ADreamPlayerController::BeginMiniatureRotationRay(const FVector& ViewOrigin, const FVector& ViewDirection)
+{
+	UDreamSceneCapturePresentationComponent* Miniature = InspectedMiniature.Get();
+	if (!bMiniatureInteractionMode || bRotatingMiniature || IsDraggingInteraction()
+		|| !Miniature || !Miniature->IsInspecting() || !GetWorld())
+		return false;
+	FVector DisplayHit, CaptureOrigin, CaptureDirection;
+	FString Reason;
+	if (!Miniature->TryMapViewRayToCaptureRay(ViewOrigin, ViewDirection,
+		DisplayHit, CaptureOrigin, CaptureDirection, Reason))
+		return false;
+	// 显示平面没有碰撞，必须额外检查玩家与平面之间的真实遮挡，和左键点击保持一致。
+	FHitResult Blocker;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DreamMiniatureRotationOcclusion), true, GetPawn());
+	if (GetWorld()->LineTraceSingleByChannel(Blocker, ViewOrigin,
+		DisplayHit - ViewDirection.GetSafeNormal(), InteractTraceChannel, Params))
+		return false;
+	bRotatingMiniature = true;
+	return true;
+}
+
+void ADreamPlayerController::UpdateMiniatureRotation()
+{
+	if (!bRotatingMiniature)
+		return;
+	UDreamSceneCapturePresentationComponent* Miniature = InspectedMiniature.Get();
+	const ULocalPlayer* LocalPlayer = GetLocalPlayer();
+	const FViewport* Viewport = LocalPlayer && LocalPlayer->ViewportClient ? LocalPlayer->ViewportClient->Viewport : nullptr;
+	float MouseX = 0.0f, MouseY = 0.0f;
+	if (!bMiniatureInteractionMode || !Miniature || !Miniature->IsInspecting() || IsDraggingInteraction()
+		|| Miniature->GetOwner() != GetPawn() || !IsInputKeyDown(EKeys::RightMouseButton)
+		|| !Viewport || !Viewport->HasFocus() || !GetMousePosition(MouseX, MouseY))
+	{
+		EndMiniatureRotation();
+		return;
+	}
+	const FIntPoint Size = Viewport->GetSizeXY();
+	if (MouseX < 0.0f || MouseY < 0.0f || MouseX >= Size.X || MouseY >= Size.Y)
+	{
+		// 允许移出手办矩形继续转动，但移出游戏窗口就结束，重新进入不会把旧位移累计进来。
+		EndMiniatureRotation();
+		return;
+	}
+	const FVector2D Position(MouseX, MouseY);
+	Miniature->RotateInspection(Position - LastMiniatureRotationMousePosition);
+	LastMiniatureRotationMousePosition = Position;
+}
+
+void ADreamPlayerController::EndMiniatureRotation()
+{
+	bRotatingMiniature = false;
+	LastMiniatureRotationMousePosition = FVector2D::ZeroVector;
 }
 
 bool ADreamPlayerController::GetMiniatureClickDebug(
@@ -320,7 +437,7 @@ void ADreamPlayerController::ReportMiniatureClick(const FString& Message, const 
 
 void ADreamPlayerController::InteractWithMiniature()
 {
-	if (!bMiniatureInteractionMode || !GetWorld() || IsDraggingInteraction())
+	if (!bMiniatureInteractionMode || !GetWorld() || IsDraggingInteraction() || bRotatingMiniature)
 		return;
 
 	// 实际相机可能因 SpringArm 碰撞或滚轮缩放偏离捕获使用的理想观察位置。
@@ -336,7 +453,7 @@ void ADreamPlayerController::InteractWithMiniature()
 
 void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection)
 {
-	if (!GetWorld() || IsDraggingInteraction())
+	if (!GetWorld() || IsDraggingInteraction() || bRotatingMiniature)
 		return;
 	const ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
 	const UDreamSceneCapturePresentationComponent* Miniature =
@@ -505,7 +622,7 @@ bool ADreamPlayerController::IsDraggingInteraction() const
 void ADreamPlayerController::BeginActiveDrag(
 	UDreamDragInteractionComponent* Component, const FVector& RayOrigin, const FVector& RayDirection)
 {
-	if (IsDraggingInteraction())
+	if (IsDraggingInteraction() || bRotatingMiniature)
 		return;
 	// 上个目标若已被销毁，先解除旧输入锁，再尝试新的目标。
 	EndActiveDrag();
@@ -544,14 +661,21 @@ void ADreamPlayerController::BeginActiveDrag(
 void ADreamPlayerController::PlayerTick(float DeltaTime)
 {
 	Super::PlayerTick(DeltaTime);
+	// 停用显示、销毁角色或外部切换 ViewTarget 都不能留下 Tab 输入锁。
+	// 通过当前会话的弱引用检查旧对象，避免新 Pawn 意外继承上一位角色的观察状态。
+	if (bMiniatureInputLocked && (!InspectedMiniature.IsValid() || !MiniatureFocusCamera.IsValid()
+		|| InspectedMiniature->GetOwner() != GetPawn() || !InspectedMiniature->IsInspecting()
+		|| !MiniatureFocusCamera->IsActive() || GetViewTarget() != GetPawn()))
+		SetMiniatureInteractionMode(false);
 	UpdateActiveDrag();
+	UpdateMiniatureRotation();
 }
 
 void ADreamPlayerController::BeginMiniatureExtract(
 	UDreamMiniatureExtractableComponent* Component, UPrimitiveComponent* HitComponent,
 	const FVector& DisplayHitPoint, const FVector& DisplayFrontNormal)
 {
-	if (IsDraggingInteraction() || !Component || !bMiniatureInteractionMode)
+	if (IsDraggingInteraction() || bRotatingMiniature || !Component || !bMiniatureInteractionMode)
 		return;
 	EndActiveDrag();
 	if (!Component->BeginExtract(GetPawn(), HitComponent, DisplayHitPoint, DisplayFrontNormal))
@@ -705,6 +829,8 @@ void ADreamPlayerController::EndActiveDrag(bool bTryCommitMiniatureExtract)
 
 void ADreamPlayerController::OnUnPossess()
 {
+	if (bMiniatureInteractionMode)
+		SetMiniatureInteractionMode(false);
 	EndActiveDrag();
 	Super::OnUnPossess();
 }

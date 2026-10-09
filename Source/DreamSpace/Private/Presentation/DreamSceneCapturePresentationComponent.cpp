@@ -121,8 +121,81 @@ void UDreamSceneCapturePresentationComponent::BeginPlay()
 
 void UDreamSceneCapturePresentationComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	bInspectionActive = false;
 	DestroyPresentationResources();
 	Super::EndPlay(EndPlayReason);
+}
+
+bool UDreamSceneCapturePresentationComponent::BeginInspection()
+{
+	if (bInspectionActive)
+		return true;
+	if (!bPresentationActive || !IsValid(CaptureActor) || !IsValid(DisplayMesh))
+		return false;
+	USceneCaptureComponent2D* Capture = CaptureActor->GetCaptureComponent2D();
+	if (!Capture)
+		return false;
+
+	// 先记录探索模式的完整取景，再让主相机推近显示面。否则新的观察距离会被
+	// 当成窗口景别输入，Tab 一按建筑就会突然放大，右键旋转的初始姿态也会跳变。
+	UpdateCaptureView();
+	const FVector ToCenter = ResolveCapturedSceneReference().GetLocation() - CaptureActor->GetActorLocation();
+	InspectionCaptureDistance = ToCenter.Size();
+	if (InspectionCaptureDistance <= UE_SMALL_NUMBER)
+		return false;
+	InspectionCaptureRotation = FRotationMatrix::MakeFromXZ(
+		ToCenter, CaptureActor->GetActorUpVector()).ToQuat();
+	InspectionCaptureFOV = Capture->FOVAngle;
+	InspectionCaptureOrthoWidth = Capture->OrthoWidth;
+	bInspectionActive = true;
+	return true;
+}
+
+void UDreamSceneCapturePresentationComponent::EndInspection()
+{
+	if (!bInspectionActive)
+		return;
+	bInspectionActive = false;
+	// 观察期间所有面向模式都临时朝向玩家。固定面向退出后不会逐帧重算，
+	// 因此必须显式还原配置旋转，否则本次居中会永久覆盖它的探索朝向。
+	if (DisplayMesh && DisplayFacingMode == EDreamMiniatureFacingMode::Fixed)
+		DisplayMesh->SetRelativeRotation(DisplayRelativeTransform.GetRotation());
+	// 恢复取景时只读取探索相机，展示旋转不会写回控制旋转或关卡 Actor 的 Transform。
+	if (bPresentationActive)
+		RefreshCaptureNow();
+}
+
+void UDreamSceneCapturePresentationComponent::RotateInspection(const FVector2D& PointerDelta)
+{
+	if (!bInspectionActive || !bPresentationActive || PointerDelta.ContainsNaN() || PointerDelta.IsNearlyZero())
+		return;
+
+	// 鼠标向右/下拖动时，让模型向右/下转动，因此捕获镜头使用相反的水平公转。
+	// 两根转轴都来自当前捕获镜头，始终对应画面的上/右方向，不依赖世界 Z 或角色重力。
+	// 不累计欧拉 Pitch/Yaw，也不夹紧俯仰：连续拖动可越过极点，归一化避免长时间操作的漂移。
+	const float RadiansPerPixel = FMath::DegreesToRadians(FMath::Max(InspectionRotationDegreesPerPixel, 0.01f));
+	// 合并二维输入为一次轴角旋转，同方向的斜拖分成多帧后仍得到相同姿态。
+	// 若逐帧先 Yaw 再 Pitch，两次非交换旋转会让同一斜线在不同采样频率下产生额外滚转。
+	const FVector AngularDelta = InspectionCaptureRotation.GetRightVector() * PointerDelta.Y
+		- InspectionCaptureRotation.GetUpVector() * PointerDelta.X;
+	const FQuat Turn(AngularDelta.GetSafeNormal(), AngularDelta.Size() * RadiansPerPixel);
+	InspectionCaptureRotation = (Turn * InspectionCaptureRotation).GetNormalized();
+	UpdateCaptureView();
+}
+
+FVector UDreamSceneCapturePresentationComponent::GetDisplayCenter() const
+{
+	return ResolveDisplayPlaneWorldTransform().GetLocation();
+}
+
+FVector2D UDreamSceneCapturePresentationComponent::GetDisplaySize() const
+{
+	if (IsValid(DisplayMesh) && DisplayMesh->GetStaticMesh())
+	{
+		const FVector Size = DisplayMesh->GetStaticMesh()->GetBoundingBox().GetSize() * DisplayMesh->GetComponentScale().GetAbs();
+		return FVector2D(Size.X, Size.Y);
+	}
+	return DisplayWorldSize;
 }
 
 void UDreamSceneCapturePresentationComponent::TickComponent(
@@ -474,6 +547,8 @@ void UDreamSceneCapturePresentationComponent::DestroyPresentationResources()
 void UDreamSceneCapturePresentationComponent::SetPresentationActive(bool bActive)
 {
 	bPresentationActive = bActive && CaptureActor && DisplayMesh && RenderTarget && DisplayMaterialInstance;
+	if (!bPresentationActive)
+		EndInspection();
 	if (DisplayMesh)
 	{
 		DisplayMesh->SetHiddenInGame(!bPresentationActive);
@@ -579,6 +654,21 @@ void UDreamSceneCapturePresentationComponent::UpdateCaptureView()
 {
 	if (!CaptureActor || !GetWorld())
 		return;
+	if (bInspectionActive)
+	{
+		// 主镜头保持对准手办中心，只有捕获镜头围绕真实场景锚点运动。
+		// 距离/FOV 使用进入 Tab 前的值，避免居中推近影响建筑比例；点击直接读取本捕获姿态。
+		const FVector Center = ResolveCapturedSceneReference().GetLocation();
+		CaptureActor->SetActorLocationAndRotation(
+			Center - InspectionCaptureRotation.GetForwardVector() * InspectionCaptureDistance,
+			InspectionCaptureRotation);
+		if (USceneCaptureComponent2D* Capture = CaptureActor->GetCaptureComponent2D())
+		{
+			Capture->FOVAngle = InspectionCaptureFOV;
+			Capture->OrthoWidth = InspectionCaptureOrthoWidth;
+		}
+		return;
+	}
 
 	FMinimalViewInfo PlayerPOV;
 	if (bFollowPlayerCamera && GetPlayerCameraPOV(PlayerPOV))
@@ -664,6 +754,16 @@ bool UDreamSceneCapturePresentationComponent::GetPlayerCameraPOV(FMinimalViewInf
 {
 	if (!GetWorld())
 		return false;
+	if (bInspectionActive && GetOwner())
+	{
+		// Tab 当帧就会更新 SpringArm Socket。直接读取角色相机，避免 CameraManager
+		// 尚未更新的上一帧缓存让显示面短暂朝错方向，右键旋转时面片也不能跟着捕获镜头转。
+		if (UCameraComponent* Camera = GetOwner()->FindComponentByClass<UCameraComponent>())
+		{
+			Camera->GetCameraView(0.0f, OutPOV);
+			return true;
+		}
+	}
 	const APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
 	if (!PC || !PC->PlayerCameraManager)
 		return false;
@@ -703,7 +803,7 @@ FTransform UDreamSceneCapturePresentationComponent::ResolveDisplayPlaneWorldTran
 FTransform UDreamSceneCapturePresentationComponent::GetObserverTransform(const FMinimalViewInfo& POV) const
 {
 	const FTransform ActualObserver(POV.Rotation, POV.Location);
-	if (!bIgnoreSpringArmCollision || !GetWorld())
+	if (bInspectionActive || !bIgnoreSpringArmCollision || !GetWorld())
 		return ActualObserver;
 	const APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
 	const AActor* ViewTarget = PC ? PC->GetViewTarget() : nullptr;
@@ -755,7 +855,7 @@ FTransform UDreamSceneCapturePresentationComponent::GetObserverTransform(const F
 
 void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
 {
-	if (!DisplayMesh || DisplayFacingMode == EDreamMiniatureFacingMode::Fixed)
+	if (!DisplayMesh || (!bInspectionActive && DisplayFacingMode == EDreamMiniatureFacingMode::Fixed))
 		return;
 
 	FMinimalViewInfo POV;
@@ -772,7 +872,7 @@ void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
 	// 两者会相差一个随臂长变化的夹角，看起来像额外倾斜。
 	// 不跟随玩家相机时没有捕获视线可依，退回朝向真实相机。
 	FVector ToCamera;
-	if (bFollowPlayerCamera && CaptureActor)
+	if (bFollowPlayerCamera && CaptureActor && !bInspectionActive)
 	{
 		ToCamera = -CaptureActor->GetActorForwardVector();
 	}
@@ -784,7 +884,7 @@ void UDreamSceneCapturePresentationComponent::UpdateDisplayFacing()
 		return;
 
 	FVector Up = DisplayUpDirection.GetSafeNormal();
-	if (DisplayFacingMode == EDreamMiniatureFacingMode::FaceCameraAroundWorldUp)
+	if (!bInspectionActive && DisplayFacingMode == EDreamMiniatureFacingMode::FaceCameraAroundWorldUp)
 	{
 		// 圆柱 Billboard：只在指定上方向的平面内转动，避免镜头从头顶/脚底看时翻面。
 		ToCamera = FVector::VectorPlaneProject(ToCamera, Up).GetSafeNormal();
@@ -924,6 +1024,8 @@ void UDreamSceneCapturePresentationComponent::RefreshCaptureNow()
 	UpdateCaptureBlacklist();
 	UpdateCaptureView();
 	SetPresentationActive(true);
+	// 运行时主动切镜头或修改配置时，同步显示几何，不能等下一帧才让面片转向新的主镜头。
+	UpdateDisplayFacing();
 	CaptureOnce();
 }
 
