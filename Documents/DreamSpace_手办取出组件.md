@@ -15,7 +15,8 @@
    显式组件引用填错或失效时拒绝开始，不会悄悄取出另一个网格。
 4. **取出模型比例** 默认 `0.1`，掉落物尺寸为源网格的世界尺寸乘此比例。
    此值独立于手办的 `MiniatureSceneScale`；需要与手办内模型大小近似时可以设为相同值。
-5. **掉落物类** 默认 `DreamDroppedItem`。可以指定它的蓝图子类，扩展拾取、声音和特效。
+5. **掉落物类** 默认 `DreamDroppedItem`。钥匙选择 `DreamDroppedKey`，掉落后即可用 E 拾取；
+   也可以指定掉落物的蓝图子类，扩展声音和特效。
 6. **成功后销毁源 Actor** 默认开启。关闭时保留原 Actor 引用，但将它永久隐藏、关闭碰撞并标记已取出。
 
 本组件不移动房间里的源 Actor，因此不需要枢轴，也不要求源网格为 Movable。
@@ -56,6 +57,29 @@ Enhanced Input 的 `Completed` 才尝试提交，`Canceled` 和逐帧丢失按�
 `OnDroppedFromMiniature` 蓝图事件在成功提交、源物体已移除后调用，可以在这里启用自己的拾取碰撞或效果。
 成功掉落物不属于原组件的预览会话，后续模式切换或组件清理不会删除它。
 
+## 钥匙拾取
+
+`ADreamDroppedKey` 继承普通掉落物，并默认携带 `Dream Key Pickup`（`UDreamKeyPickupComponent`）。
+钥匙身份由 **掉落物类** 显式配置，普通 `DreamDroppedItem` 不会因为网格名称而自动成为钥匙。
+当前测试蓝图 `/Game/DreamInteraction/Test/MiniatureExtractableActorTest1` 已配置为 `DreamDroppedKey`，
+保留现有长条方块占位模型、缩放和地图布局；更换钥匙静态网格后仍沿用同一拾取行为。
+
+1. 在手办内拖出钥匙模型，越过显示面边缘后松开左键，生成物理钥匙掉落物。
+2. 按 Tab 回到普通探索模式，对准世界中的掉落钥匙按 E；使用既有的准星射线，
+   默认从相机检测 600 cm，墙体等首个阻挡物会遮挡交互。
+3. 成功后销毁掉落钥匙，将当前 `ADreamCharacter.bHasKey` 从 `false` 置为 `true`。
+   蓝图可读取角色的 **物品 → 钥匙 → 已获得钥匙**，作为后续门锁判断条件。
+4. HUD 在屏幕中央显示 **已获得钥匙**，默认持续 3 秒；文字按实际字体宽高居中，
+   使用阴影并临时隐藏准星，避免准星和文字重叠。切换手办模式不会清除尚未到期的提示。
+
+只有物理提交成功才启用拾取：拖动预览、取消取出、组件停用以及无效操作者都不会获得钥匙。
+已消费的掉落物不能重复授予钥匙或刷新提示。持有状态是布尔值而非数量，提示消失后仍保持为 `true`；
+目前保存在当前角色实例中，不涉及存档、跨关卡保留或消耗钥匙逻辑。
+
+钥匙掉落后球形碰撞阻挡 `Visibility`，继续忽略 `Camera`。所有掉落物及其 ChildActor
+同时加入手办的捕获和捕获射线排除列表，避免手办中不可见的钥匙挡住其它机关。
+默认交互通道为 `Visibility`；若自行修改控制器的交互通道，需同步设置钥匙碰撞响应。
+
 ## 蓝图入口
 
 | 入口 | 用途 |
@@ -79,20 +103,32 @@ Enhanced Input 的 `Completed` 才尝试提交，`Canceled` 和逐帧丢失按�
 - 释放位置被墙阻挡、预览销毁、组件停用/移除和保留源引用时禁止重复取出。
 - 真实 SceneCapture 拾取及面外拖动、同 Actor 交互优先级、取消、模式切换、失去角色和输入锁清理。
 
+钥匙套件 `DreamSpace.Puzzle.KeyPickup` 覆盖从取出提交到 E 射线分发的流程、墙体遮挡、
+手办模式禁止拾取、角色 bool、掉落物销毁、提示有效期与重复按 E，以及预览取消和无效操作者。
+
 可运行完整 `DreamSpace` 套件回归原有旋转、平移、重力和手办交互。
 鼠标手感、目标关卡碰撞和掉落物最终尺寸仍需在配置好模型的关卡里通过 PIE 验收。
 
-2026-10-09 验证结果：UE 5.8.2 的 `DreamSpaceEditor Win64 Development` 与
+2026-10-09 取出组件初次验证：UE 5.8.2 的 `DreamSpaceEditor Win64 Development` 与
 `DreamSpace Win64 Development` 均编译成功；完整 `DreamSpace` 套件 31 项全部通过，
 包含新增 4 项取出测试。最终回归日志位于 `Saved/Logs/MiniatureExtractionRegressionFinal.log`，
 结构化报告位于 `Saved/Automation/MiniatureExtractionRegressionFinal/index.json`。
 新增取出测试没有警告；完整套件有一条 UE 后台联网探测超时警告，与交互结果无关。
-此次未在实际关卡完成可视 PIE 验收，未修改任何关卡或蓝图资产。
+初次取出组件验证未在实际关卡完成可视 PIE 验收，未修改任何关卡或蓝图资产。
+
+2026-10-09 钥匙拾取验证：更新后的编辑器和游戏 Development 目标均编译成功，
+完整 `DreamSpace` 套件 33 项全部通过，包含新增 2 项钥匙测试，测试报告没有警告或失败。
+日志为 `Saved/Logs/KeyPickupRegressionFinal.log`，报告为
+`Saved/Automation/KeyPickupRegressionFinal/index.json`。
+实际测试地图的 PIE 副本验证了保存的 `DreamDroppedKey` 配置、物理提交、组件拾取、
+角色 `bHasKey = true` 和 HUD 中文居中渲染；E 射线与墙体遮挡由上述自动化覆盖。
+提示截图为 `Saved/Screenshots/KeyPickupPIE.png`，到期后的截图为
+`Saved/Screenshots/KeyPickupPIEExpired.png`；到期后恢复准星，人物仍持有钥匙。
 
 ```powershell
 & 'E:\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' `
   'E:\UE5_program\DreamSpace\DreamSpace.uproject' -Unattended -NoSplash -NullRHI `
   '-ExecCmds=Automation RunTests DreamSpace' '-TestExit=Automation Test Queue Empty' `
-  '-ReportExportPath=E:\UE5_program\DreamSpace\Saved\Automation\MiniatureExtractionRegressionFinal' `
-  '-AbsLog=E:\UE5_program\DreamSpace\Saved\Logs\MiniatureExtractionRegressionFinal.log'
+  '-ReportExportPath=E:\UE5_program\DreamSpace\Saved\Automation\KeyPickupRegressionFinal' `
+  '-AbsLog=E:\UE5_program\DreamSpace\Saved\Logs\KeyPickupRegressionFinal.log'
 ```

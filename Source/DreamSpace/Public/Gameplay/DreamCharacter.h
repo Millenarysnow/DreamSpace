@@ -50,6 +50,19 @@ public:
 	 */
 	void MoveOnGravityPlane(const FVector2D& Input);
 
+	/**
+	 * 成功拾取钥匙后统一更新持有状态，并通知当前玩家的 HUD。
+	 * 掉落物负责确认拾取与移除自身；角色保存结果，后续门锁等机关可直接读取 bHasKey。
+	 */
+	void AcquireKey();
+
+	/**
+	 * 当前角色是否已经获得钥匙，初始为 false，成功拾取后为 true。
+	 * 这是持有状态而非数量；仅供蓝图读取，避免通过编辑默认值绕过实际拾取流程。
+	 */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "物品|钥匙", meta = (DisplayName = "已获得钥匙"))
+	bool bHasKey = false;
+
 	/** 相机摇臂；滚轮缩放和手办视差代码会直接读取它。 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "相机")
 	TObjectPtr<USpringArmComponent> CameraBoom;

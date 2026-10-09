@@ -98,6 +98,7 @@ private:
 	friend class FDreamDragControllerLifecycleTest;
 	friend class FDreamMiniatureDragMappingTest;
 	friend class FDreamMiniatureExtractionControllerTest;
+	friend class FDreamKeyPickupControllerTest;
 	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */

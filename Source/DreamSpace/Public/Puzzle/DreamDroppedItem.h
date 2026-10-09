@@ -28,7 +28,7 @@ public:
 	bool InitializeFromSource(const UStaticMeshComponent* Source, float ScaleMultiplier);
 
 	/** 拖出成功后打开球形碰撞与物理模拟；返回刚体是否成功激活。 */
-	bool ActivateDrop();
+	virtual bool ActivateDrop();
 
 	/** 释放位置必须没有外部阻挡；不能把预览中允许穿过的墙体变成初始穿透的刚体。 */
 	bool CanActivateDrop(const AActor* SourceActor) const;

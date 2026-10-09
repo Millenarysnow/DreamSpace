@@ -1,6 +1,7 @@
 #include "DreamSceneCapturePresentationComponent.h"
 
 #include "DreamSceneCaptureAnchor.h"
+#include "DreamDroppedItem.h"
 #include "EngineUtils.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/StaticMesh.h"
@@ -513,6 +514,11 @@ void UDreamSceneCapturePresentationComponent::GetCaptureHiddenActors(TArray<AAct
 	AddWithChildActors(CameraOrbitAnchorActor.Get());
 	for (AActor* Actor : ActorsToHideFromCapture)
 		AddWithChildActors(Actor);
+	// 掉落物属于玩家所在的真实世界，不再出现在手办中。钥匙为了 E 拾取会阻挡 Visibility，
+	// 因此渲染与捕获射线必须一起排除它，防止不可见的掉落钥匙遮挡手办中的房间机关。
+	if (GetWorld())
+		for (TActorIterator<ADreamDroppedItem> It(GetWorld()); It; ++It)
+			AddWithChildActors(*It);
 }
 
 void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()
