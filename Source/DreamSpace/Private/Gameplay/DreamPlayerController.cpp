@@ -208,8 +208,8 @@ void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
 	if (!SpringArm)
 		return;
 
-	// 向上滚动（WheelDelta > 0）拉近相机，向下滚动拉远。
-	// CameraZoomStep 为负时可以反转方向。
+	// 滚轮只修改理想构图距离，DreamShoulderCamera 自己平滑缩放，碰撞收近不会反写这个值。
+	// 向上滚动拉近，向下滚动拉远；范围限制是玩家偏好，墙体仍可把实际镜头推到更近的位置。
 	const float NewLength = FMath::Clamp(
 		SpringArm->TargetArmLength - WheelDelta * CameraZoomStep,
 		MinCameraArmLength, MaxCameraArmLength);

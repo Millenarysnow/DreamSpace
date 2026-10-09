@@ -14,7 +14,8 @@ struct FInputActionValue;
 /**
  * DreamSpace 使用的原生第三人称角色。
  *
- * 角色的移动、视角和跳跃输入沿用 UE5.8 官方 C++ 第三人称模板的职责划分，
+ * 角色的移动、视角和跳跃输入沿用 UE5.8 官方 C++ 第三人称模板的职责划分；
+ * 主相机使用 DreamShoulderCamera 提供近距离越肩和室内避障，身体仍朝移动方向转身。
  * 但这里把输入资源、Manny/Quinn 角色表现和项目自己的手办相机组件都放进
  * C++ 默认对象中，因此运行时不需要依赖角色蓝图或 GameMode 蓝图。
  */
@@ -50,7 +51,7 @@ public:
 	 */
 	void MoveOnGravityPlane(const FVector2D& Input);
 
-	/** 相机摇臂；滚轮缩放和手办视差代码会直接读取它。 */
+	/** 原生子对象是 DreamShoulderCamera，保留 SpringArm 类型接口供滚轮和旧资产读取。 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "相机")
 	TObjectPtr<USpringArmComponent> CameraBoom;
 

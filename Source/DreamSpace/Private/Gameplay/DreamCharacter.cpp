@@ -6,12 +6,14 @@
 #include "Components/StaticMeshComponent.h"
 #include "DreamPlayerController.h"
 #include "DreamSceneCapturePresentationComponent.h"
+#include "DreamShoulderCameraComponent.h"
 #include "EnhancedInputComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
+#include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 
 ADreamCharacter::ADreamCharacter()
@@ -48,6 +50,19 @@ ADreamCharacter::ADreamCharacter()
 		if (QuinnMesh.Succeeded())
 		{
 			CharacterMesh->SetSkeletalMesh(QuinnMesh.Object);
+			// 使用独立副本，不修改共享的模板网格/材质。两槽保留 Quinn 的原贴图和颜色继承链。
+			// 相机只为支持 DreamOwnerClip 的材质建立本角色 MID；默认 Amount=0，正常距离完全可见。
+			static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClipBody(
+				TEXT("/Game/DreamCamera/Materials/MI_QuinnOwnerClip_01.MI_QuinnOwnerClip_01"));
+			static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClipDetails(
+				TEXT("/Game/DreamCamera/Materials/MI_QuinnOwnerClip_02.MI_QuinnOwnerClip_02"));
+			if (ClipBody.Succeeded() && ClipDetails.Succeeded())
+			{
+				CharacterMesh->SetMaterial(0, ClipBody.Object);
+				CharacterMesh->SetMaterial(1, ClipDetails.Object);
+			}
+			else
+				UE_LOG(LogTemp, Error, TEXT("缺少局部剔除材质，请运行 Documents/Tools/GenerateOwnerClipMaterials.py；角色保持原材质可见。"));
 		}
 		else
 		{
@@ -68,11 +83,11 @@ ADreamCharacter::ADreamCharacter()
 		}
 	}
 
-	// 官方模板的相机轨道。保留项目原先的 420 cm 臂长和 60 cm 高度，
-	// 因为手办窗口的 ObserverArmLength 默认也以 420 cm 为对应观察距离。
-	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
+	// 越肩相机保持原有 CameraBoom 子对象名称和 SpringArm 接口，滚轮和旧资产仍能找到它。
+	// 理想距离 210 cm、右肩偏移 45 cm；人物按移动方向转身，不强制朝相机方向横移/倒退。
+	// 枢轴挂胶囊而非动画骨骼，默认沿角色局部向上 60 cm，重力翻转时也随胶囊一起转动。
+	CameraBoom = CreateDefaultSubobject<UDreamShoulderCameraComponent>(TEXT("CameraBoom"));
 	CameraBoom->SetupAttachment(RootComponent);
-	CameraBoom->TargetArmLength = 420.0f;
 	CameraBoom->bUsePawnControlRotation = true;
 	CameraBoom->SetRelativeLocation(FVector(0.0f, 0.0f, 60.0f));
 
@@ -80,6 +95,12 @@ ADreamCharacter::ADreamCharacter()
 	FollowCamera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 	FollowCamera->bUsePawnControlRotation = false;
 	FollowCamera->bConstrainAspectRatio = false;
+	// 第一版固定水平 FOV，避免室内避障同时改变距离和视场角而产生额外的缩放感。
+	FollowCamera->FieldOfView = 80.0f;
+	// 只有主跟随视角携带局部剔除标记。材质还核对实际镜头位置/朝向，隔离分屏和其他角色。
+	// UserFlags 第 6 位由本功能保留；其他后处理功能可继续使用其余位。
+	FollowCamera->PostProcessSettings.bOverride_UserFlags = true;
+	FollowCamera->PostProcessSettings.UserFlags |= UDreamShoulderCameraComponent::OwnerClipViewFlag;
 
 	// 手办显示面仍然挂在角色胶囊体右前方，位置、180 度显示朝向和相机映射
 	// 与原有实现保持一致。该组件的 SceneCapture 不参与角色移动输入。
