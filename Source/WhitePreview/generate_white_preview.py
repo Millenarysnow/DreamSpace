@@ -322,7 +322,9 @@ def create_preview_level(records, white_material, outline_instance, smoothing_ma
     post.set_editor_property("priority", 100.0)
     post.set_editor_property("settings", configure_post_settings(post.get_editor_property("settings")))
     post.add_or_update_blendable(outline_instance, 1.0)
-    post.add_or_update_blendable(smoothing_material, 1.0)
+    # 线稿版使用末端抗锯齿；白盒版传入 None，只挂载自己的面明暗材质。
+    if smoothing_material is not None:
+        post.add_or_update_blendable(smoothing_material, 1.0)
 
     # 用包围盒的八个角计算透视取景距离，包含主体的所有楼层和底部。
     # 固定三分之四视角便于同时看到外形、台阶、走道与内凹结构。
