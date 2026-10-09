@@ -345,6 +345,16 @@ public:
 		FVector& OutDisplayHitPoint, FVector& OutCaptureRayOrigin,
 		FVector& OutCaptureRayDirection, FString& OutFailureReason) const;
 
+	/**
+	 * 与显示面的无限延伸平面求交，返回未截断的 UV、世界交点和朝向玩家的法线。
+	 * 取出交互在鼠标越过显示面边缘后仍需要连续跟随，所以不能使用捕获射线的矩形边界限制。
+	 * 本入口只提供显示几何；是否提交取出、如何生成掉落物仍由玩法组件决定。
+	 */
+	bool TryMapViewRayToDisplayPlane(
+		const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
+		FVector& OutDisplayHitPoint, FVector2D& OutUnclampedUV,
+		FVector& OutDisplayFrontNormal, FString& OutFailureReason) const;
+
 	/** 返回 SceneCapture 不渲染的 Actor；拾取射线也跳过它们及其 ChildActor。 */
 	void GetCaptureHiddenActors(TArray<AActor*>& OutActors) const;
 
@@ -359,11 +369,14 @@ public:
 	 * 无碰撞平面的解析求交：输出默认 Plane UV0 布局下的纹理坐标。
 	 * 纯几何函数便于覆盖越界、背面、图像旋转、缩放和实际相机偏移的回归测试。
 	 * 180° 修正由显示面的真实变换体现，调用者不可再次翻转 UV。
+	 * bRequireInsideDisplay 默认为 true；取出交互传 false 后保留超出 0..1 的 UV，
+	 * 但仍检查正面、有限射线及正缩放，不把背面或非法射线当成成功拖出。
 	 */
 	static bool MapViewRayToDisplayUV(
 		const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
 		const FTransform& DisplayWorldTransform, const FBox& DisplayLocalBounds,
-		FVector& OutDisplayHitPoint, FVector2D& OutUV, FString& OutFailureReason);
+		FVector& OutDisplayHitPoint, FVector2D& OutUV, FString& OutFailureReason,
+		bool bRequireInsideDisplay = true);
 
 private:
 	/** 运行时动态创建的场景捕获 Actor；它只属于表现层，不注册为交互装配体。 */

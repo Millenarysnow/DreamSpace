@@ -3,6 +3,7 @@
 #include "DreamSceneCapturePresentationComponent.h"
 #include "DreamInteractableInterface.h"
 #include "DreamDragInteractionComponent.h"
+#include "DreamMiniatureExtractableComponent.h"
 #include "DreamSpace.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -13,6 +14,9 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "GameFramework/Actor.h"
 #include "Engine/HitResult.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/LocalPlayer.h"
+#include "UnrealClient.h"
 #include "DrawDebugHelpers.h"
 #include "HAL/IConsoleManager.h"
 #include "UObject/ConstructorHelpers.h"
@@ -129,7 +133,7 @@ void ADreamPlayerController::SetupInputComponent()
 		Button(EKeys::Tab, &ADreamPlayerController::ToggleMiniatureInteractionMode);
 		UInputAction* MiniatureAction = Button(EKeys::LeftMouseButton, &ADreamPlayerController::InteractWithMiniature);
 		Input->BindAction(MiniatureAction, ETriggerEvent::Completed, this, &ADreamPlayerController::EndMiniatureDrag);
-		Input->BindAction(MiniatureAction, ETriggerEvent::Canceled, this, &ADreamPlayerController::EndMiniatureDrag);
+		Input->BindAction(MiniatureAction, ETriggerEvent::Canceled, this, &ADreamPlayerController::CancelMiniatureDrag);
 
 		// 滚轮缩放不属于官方模板输入，因此保留一个本地 Axis1D 动作。
 		auto* ZoomAction = NewObject<UInputAction>(this);
@@ -332,6 +336,8 @@ void ADreamPlayerController::InteractWithMiniature()
 
 void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection)
 {
+	if (!GetWorld() || IsDraggingInteraction())
+		return;
 	const ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
 	const UDreamSceneCapturePresentationComponent* Miniature =
 		ControlledCharacter ? ControlledCharacter->SceneMiniature.Get() : nullptr;
@@ -400,6 +406,20 @@ void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrig
 	if (!HitActor)
 	{
 		ReportMiniatureClick(TEXT("已映射；捕获射线未命中，请检查目标碰撞、通道和检测距离"), FColor::Red);
+		return;
+	}
+	// 取出组件在手办模式优先，只开启一个持续行为；不能再同时触发该 Actor 的旋转或平移。
+	// 仍使用上方完整的遮挡与捕获拾取路径，墙后或捕获黑名单中的模型不会被越过来取出。
+	if (UDreamMiniatureExtractableComponent* Extract = HitActor->FindComponentByClass<UDreamMiniatureExtractableComponent>())
+	{
+		FVector PlaneHit, FrontNormal;
+		FVector2D UV;
+		if (!bMiniatureInteractionMode || !Miniature->TryMapViewRayToDisplayPlane(
+			ViewRayOrigin, ViewRayDirection, PlaneHit, UV, FrontNormal, FailureReason))
+			return;
+		BeginMiniatureExtract(Extract, CaptureHit.GetComponent(), DisplayHit, FrontNormal);
+		ReportMiniatureClick(IsDraggingInteraction() ? TEXT("已抓取模型；拖出手办显示面后松开左键") :
+			TEXT("取出未开始，请检查源模型和掉落物配置"), IsDraggingInteraction() ? FColor::Green : FColor::Red);
 		return;
 	}
 	// 首个非交互物体仍是遮挡物，不能穿过去寻找后方机关。
@@ -478,7 +498,8 @@ void ADreamPlayerController::DispatchInteraction(AActor* HitActor, UActorCompone
 bool ADreamPlayerController::IsDraggingInteraction() const
 {
 	const UDreamDragInteractionComponent* Component = ActiveDragComponent.Get();
-	return Component && Component->IsDragging();
+	const UDreamMiniatureExtractableComponent* Extract = ActiveMiniatureExtract.Get();
+	return (Component && Component->IsDragging()) || (Extract && Extract->IsExtracting());
 }
 
 void ADreamPlayerController::BeginActiveDrag(
@@ -526,10 +547,66 @@ void ADreamPlayerController::PlayerTick(float DeltaTime)
 	UpdateActiveDrag();
 }
 
+void ADreamPlayerController::BeginMiniatureExtract(
+	UDreamMiniatureExtractableComponent* Component, UPrimitiveComponent* HitComponent,
+	const FVector& DisplayHitPoint, const FVector& DisplayFrontNormal)
+{
+	if (IsDraggingInteraction() || !Component || !bMiniatureInteractionMode)
+		return;
+	EndActiveDrag();
+	if (!Component->BeginExtract(GetPawn(), HitComponent, DisplayHitPoint, DisplayFrontNormal))
+		return;
+	ActiveMiniatureExtract = Component;
+	DragPawn = GetPawn();
+	bDragFromMiniature = true;
+	bDragInputLocked = true;
+	SetIgnoreLookInput(true);
+	SetIgnoreMoveInput(true);
+}
+
+bool ADreamPlayerController::UpdateMiniatureExtractRay(const FVector& ViewOrigin, const FVector& ViewDirection)
+{
+	UDreamMiniatureExtractableComponent* Extract = ActiveMiniatureExtract.Get();
+	const ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
+	const UDreamSceneCapturePresentationComponent* Miniature =
+		ControlledCharacter ? ControlledCharacter->SceneMiniature.Get() : nullptr;
+	FVector DisplayHit, FrontNormal;
+	FVector2D UV;
+	FString Reason;
+	if (!Extract || !Extract->IsExtracting() || !Miniature || !bMiniatureInteractionMode || DragPawn.Get() != GetPawn() ||
+		!Miniature->TryMapViewRayToDisplayPlane(ViewOrigin, ViewDirection, DisplayHit, UV, FrontNormal, Reason))
+		return false;
+	Extract->UpdateExtract(DisplayHit, UV, FrontNormal);
+	return Extract->IsExtracting();
+}
+
+bool ADreamPlayerController::UpdateActiveMiniatureExtract()
+{
+	const ULocalPlayer* LocalPlayer = GetLocalPlayer();
+	const FViewport* GameViewport = LocalPlayer && LocalPlayer->ViewportClient ? LocalPlayer->ViewportClient->Viewport : nullptr;
+	// GetMousePosition 可能返回失焦前缓存的位置；失焦产生的按键清理不能按旧 UV 提交取出。
+	if (!GameViewport || !GameViewport->HasFocus())
+		return false;
+	float MouseX = 0.0f, MouseY = 0.0f;
+	FVector Origin, Direction;
+	// 在松开事件中也重新采样，避免鼠标最后一帧从面外回到面内却按旧位置提交。
+	const FIntPoint ViewportSize = GameViewport->GetSizeXY();
+	return GetMousePosition(MouseX, MouseY) && MouseX >= 0.0f && MouseY >= 0.0f &&
+		MouseX < ViewportSize.X && MouseY < ViewportSize.Y &&
+		DeprojectScreenPositionToWorld(MouseX, MouseY, Origin, Direction) && UpdateMiniatureExtractRay(Origin, Direction);
+}
+
 void ADreamPlayerController::UpdateActiveDrag()
 {
 	if (!bDragInputLocked)
 		return;
+	if (ActiveMiniatureExtract.IsValid())
+	{
+		// 正常松开由 Completed 回调提交；逐帧兜底检测到失焦或丢失按键时只取消。
+		if (!IsInputKeyDown(EKeys::LeftMouseButton) || !UpdateActiveMiniatureExtract())
+			EndActiveDrag();
+		return;
+	}
 	UDreamDragInteractionComponent* Component = ActiveDragComponent.Get();
 	const FKey HoldKey = bDragFromMiniature ? EKeys::LeftMouseButton : EKeys::E;
 	// 逐帧兜底处理窗口失焦、目标销毁、组件主动结束以及换角色，不依赖按键释放回调一定送达。
@@ -593,14 +670,26 @@ void ADreamPlayerController::EndWorldDrag()
 void ADreamPlayerController::EndMiniatureDrag()
 {
 	if (bDragFromMiniature)
+	{
+		const bool bCanCommit = ActiveMiniatureExtract.IsValid() && UpdateActiveMiniatureExtract();
+		EndActiveDrag(bCanCommit);
+	}
+}
+
+void ADreamPlayerController::CancelMiniatureDrag()
+{
+	if (bDragFromMiniature)
 		EndActiveDrag();
 }
 
-void ADreamPlayerController::EndActiveDrag()
+void ADreamPlayerController::EndActiveDrag(bool bTryCommitMiniatureExtract)
 {
 	if (UDreamDragInteractionComponent* Component = ActiveDragComponent.Get())
 		Component->EndDrag();
+	if (UDreamMiniatureExtractableComponent* Component = ActiveMiniatureExtract.Get())
+		Component->EndExtract(bTryCommitMiniatureExtract);
 	ActiveDragComponent.Reset();
+	ActiveMiniatureExtract.Reset();
 	DragPawn.Reset();
 	if (!bDragInputLocked)
 		return;

@@ -5,6 +5,8 @@ class UInputMappingContext;
 class UInputAction;
 class UActorComponent;
 class UDreamDragInteractionComponent;
+class UDreamMiniatureExtractableComponent;
+class UPrimitiveComponent;
 struct FInputActionValue;
 
 /**
@@ -25,7 +27,7 @@ public:
 	virtual void UpdateRotation(float DeltaTime) override;
 	virtual void PlayerTick(float DeltaTime) override;
 	virtual void OnUnPossess() override;
-	/** 是否正在通过 E 或手办左键持续操纵一个自由交互组件。 */
+	/** 是否正在持续拖动机关或从手办取出模型；角色与相机用此状态保持交互期间的输入稳定。 */
 	UFUNCTION(BlueprintPure, Category = "交互")
 	bool IsDraggingInteraction() const;
 	/** 当前是否显示鼠标、允许直接点击手办中的物体。供开发期 HUD 显示操作提示。 */
@@ -83,6 +85,8 @@ private:
 	void Interact();
 	void EndWorldDrag();
 	void EndMiniatureDrag();
+	/** 输入取消与正常松开分开处理，失焦/上下文移除不能提交取出。 */
+	void CancelMiniatureDrag();
 	/** Tab 切换光标模式：进入时暂停鼠标转视角，左键改为点击手办画面。 */
 	void ToggleMiniatureInteractionMode();
 	void SetMiniatureInteractionMode(bool bEnabled);
@@ -93,6 +97,8 @@ private:
 	friend class FDreamMiniatureConfiguredProjectionTest;
 	friend class FDreamDragControllerLifecycleTest;
 	friend class FDreamMiniatureDragMappingTest;
+	friend class FDreamMiniatureExtractionControllerTest;
+	friend class FDreamKeyPickupControllerTest;
 	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
@@ -104,8 +110,17 @@ private:
 	void UpdateActiveDrag();
 	/** 把任意屏幕位置映射到当前输入空间，手办模式仍使用表现组件自己的投影与边界检查。 */
 	bool TryGetDragRay(const FVector2D& ScreenPosition, FVector& OutOrigin, FVector& OutDirection) const;
-	void EndActiveDrag();
+	/** 只有正常松开左键才允许提交取出，其它生命周期清理默认取消。 */
+	void EndActiveDrag(bool bTryCommitMiniatureExtract = false);
+	/** 复用持续交互的移动/视角锁，但取出组件不需要枢轴，也不移动房间模型。 */
+	void BeginMiniatureExtract(UDreamMiniatureExtractableComponent* Component,
+		UPrimitiveComponent* HitComponent, const FVector& DisplayHitPoint,
+		const FVector& DisplayFrontNormal);
+	/** 屏幕输入与几何处理分离，自动化可通过已知视线覆盖真实的面外拖动路径。 */
+	bool UpdateMiniatureExtractRay(const FVector& ViewOrigin, const FVector& ViewDirection);
+	bool UpdateActiveMiniatureExtract();
 	TWeakObjectPtr<UDreamDragInteractionComponent> ActiveDragComponent;
+	TWeakObjectPtr<UDreamMiniatureExtractableComponent> ActiveMiniatureExtract;
 	TWeakObjectPtr<APawn> DragPawn;
 	FVector2D LastDragMousePosition = FVector2D::ZeroVector;
 	bool bDragFromMiniature = false;

@@ -2,6 +2,7 @@
 
 #include "DreamSceneCaptureAnchor.h"
 #include "DreamShoulderCameraComponent.h"
+#include "DreamDroppedItem.h"
 #include "EngineUtils.h"
 #include "Engine/SceneCapture2D.h"
 #include "Engine/StaticMesh.h"
@@ -306,11 +307,18 @@ float UDreamSceneCapturePresentationComponent::ComputeWindowFieldOfView(
 bool UDreamSceneCapturePresentationComponent::MapViewRayToDisplayUV(
 	const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
 	const FTransform& DisplayWorldTransform, const FBox& DisplayLocalBounds,
-	FVector& OutDisplayHitPoint, FVector2D& OutUV, FString& OutFailureReason)
+	FVector& OutDisplayHitPoint, FVector2D& OutUV, FString& OutFailureReason,
+	bool bRequireInsideDisplay)
 {
 	OutDisplayHitPoint = FVector::ZeroVector;
 	OutUV = FVector2D::ZeroVector;
 	OutFailureReason.Reset();
+	if (ViewRayOrigin.ContainsNaN() || ViewRayDirection.ContainsNaN() ||
+		ViewRayDirection.IsNearlyZero() || DisplayWorldTransform.ContainsNaN())
+	{
+		OutFailureReason = TEXT("鼠标射线或显示面变换无效");
+		return false;
+	}
 	const FVector Scale = DisplayWorldTransform.GetScale3D();
 	if (!DisplayLocalBounds.IsValid || DisplayLocalBounds.GetSize().X <= 0.0 ||
 		DisplayLocalBounds.GetSize().Y <= 0.0 || DisplayLocalBounds.GetExtent().Z > 1.0 ||
@@ -331,7 +339,7 @@ bool UDreamSceneCapturePresentationComponent::MapViewRayToDisplayUV(
 	}
 	const FVector FrameCenter = DisplayWorldTransform.TransformPosition(DisplayLocalBounds.GetCenter());
 	const double HitDistance = FVector::DotProduct(FrameCenter - ViewRayOrigin, PlaneNormal) / RayDotNormal;
-	if (HitDistance <= 0.0)
+	if (HitDistance <= 0.0 || !FMath::IsFinite(HitDistance))
 	{
 		OutFailureReason = TEXT("显示面位于鼠标射线起点后方");
 		return false;
@@ -339,10 +347,10 @@ bool UDreamSceneCapturePresentationComponent::MapViewRayToDisplayUV(
 	const FVector DisplayHit = ViewRayOrigin + RayDirection * HitDistance;
 	const FVector LocalHit = DisplayWorldTransform.InverseTransformPosition(DisplayHit);
 	constexpr double EdgeTolerance = 0.01;
-	if (LocalHit.X < DisplayLocalBounds.Min.X - EdgeTolerance ||
+	if (bRequireInsideDisplay && (LocalHit.X < DisplayLocalBounds.Min.X - EdgeTolerance ||
 		LocalHit.X > DisplayLocalBounds.Max.X + EdgeTolerance ||
 		LocalHit.Y < DisplayLocalBounds.Min.Y - EdgeTolerance ||
-		LocalHit.Y > DisplayLocalBounds.Max.Y + EdgeTolerance)
+		LocalHit.Y > DisplayLocalBounds.Max.Y + EdgeTolerance))
 	{
 		OutFailureReason = TEXT("点击位置在手办矩形显示面之外");
 		return false;
@@ -352,8 +360,18 @@ bool UDreamSceneCapturePresentationComponent::MapViewRayToDisplayUV(
 	// 先逆变换回网格局部空间，可同时处理挂点旋转、父节点缩放和实际相机被墙推近。
 	// 180° 图像修正已经体现在 DisplayWorldTransform 中，不要在此重复翻转 UV。
 	OutUV = FVector2D(
-		FMath::Clamp((LocalHit.X - DisplayLocalBounds.Min.X) / DisplayLocalBounds.GetSize().X, 0.0, 1.0),
-		FMath::Clamp((LocalHit.Y - DisplayLocalBounds.Min.Y) / DisplayLocalBounds.GetSize().Y, 0.0, 1.0));
+		(LocalHit.X - DisplayLocalBounds.Min.X) / DisplayLocalBounds.GetSize().X,
+		(LocalHit.Y - DisplayLocalBounds.Min.Y) / DisplayLocalBounds.GetSize().Y);
+	if (bRequireInsideDisplay)
+	{
+		OutUV.X = FMath::Clamp(OutUV.X, 0.0, 1.0);
+		OutUV.Y = FMath::Clamp(OutUV.Y, 0.0, 1.0);
+	}
+	if (DisplayHit.ContainsNaN() || OutUV.ContainsNaN())
+	{
+		OutFailureReason = TEXT("显示面交点或纹理坐标无效");
+		return false;
+	}
 	OutDisplayHitPoint = DisplayHit;
 	return true;
 }
@@ -408,6 +426,30 @@ bool UDreamSceneCapturePresentationComponent::TryMapViewRayToCaptureRay(
 	}
 	// 引擎返回近裁剪面上的起点；透视相机的同一条射线穿过光心，按本功能约定从光心发射。
 	OutCaptureRayOrigin = CaptureComponent->GetComponentLocation();
+	return true;
+}
+
+bool UDreamSceneCapturePresentationComponent::TryMapViewRayToDisplayPlane(
+	const FVector& ViewRayOrigin, const FVector& ViewRayDirection,
+	FVector& OutDisplayHitPoint, FVector2D& OutUnclampedUV,
+	FVector& OutDisplayFrontNormal, FString& OutFailureReason) const
+{
+	OutDisplayHitPoint = FVector::ZeroVector;
+	OutUnclampedUV = FVector2D::ZeroVector;
+	OutDisplayFrontNormal = FVector::ZeroVector;
+	OutFailureReason.Reset();
+	const UStaticMesh* MeshAsset = DisplayMesh ? DisplayMesh->GetStaticMesh() : nullptr;
+	if (!bPresentationActive || !MeshAsset)
+	{
+		OutFailureReason = TEXT("手办未启用，或显示网格尚未创建");
+		return false;
+	}
+	// 捕获拾取与取出拖动共用同一套 UV 数学，避免图像 180° 修正和非等比显示出现两套约定。
+	if (!MapViewRayToDisplayUV(ViewRayOrigin, ViewRayDirection,
+		DisplayMesh->GetComponentTransform(), MeshAsset->GetBoundingBox(),
+		OutDisplayHitPoint, OutUnclampedUV, OutFailureReason, false))
+		return false;
+	OutDisplayFrontNormal = DisplayMesh->GetComponentQuat().GetAxisZ();
 	return true;
 }
 
@@ -477,6 +519,11 @@ void UDreamSceneCapturePresentationComponent::GetCaptureHiddenActors(TArray<AAct
 	AddWithChildActors(CameraOrbitAnchorActor.Get());
 	for (AActor* Actor : ActorsToHideFromCapture)
 		AddWithChildActors(Actor);
+	// 掉落物属于玩家所在的真实世界，不再出现在手办中。钥匙为了 E 拾取会阻挡 Visibility，
+	// 因此渲染与捕获射线必须一起排除它，防止不可见的掉落钥匙遮挡手办中的房间机关。
+	if (GetWorld())
+		for (TActorIterator<ADreamDroppedItem> It(GetWorld()); It; ++It)
+			AddWithChildActors(*It);
 }
 
 void UDreamSceneCapturePresentationComponent::UpdateCaptureBlacklist()

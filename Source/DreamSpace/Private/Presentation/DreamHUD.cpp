@@ -1,7 +1,21 @@
 #include "DreamHUD.h"
+#include "CanvasItem.h"
 #include "DreamPlayerController.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
+#include "Engine/World.h"
+
+void ADreamHUD::ShowKeyAcquiredMessage()
+{
+	if (GetWorld())
+		KeyAcquiredMessageUntil = GetWorld()->GetRealTimeSeconds() + KeyAcquiredMessageDuration;
+}
+
+bool ADreamHUD::IsKeyAcquiredMessageVisible() const
+{
+	return GetWorld() && GetWorld()->GetRealTimeSeconds() < KeyAcquiredMessageUntil;
+}
+
 void ADreamHUD::DrawHUD()
 {
 	Super::DrawHUD();
@@ -29,11 +43,28 @@ void ADreamHUD::DrawHUD()
 		DrawLine(ClickPosition.X - 9, ClickPosition.Y, ClickPosition.X + 9, ClickPosition.Y, ClickColor, 2);
 		DrawLine(ClickPosition.X, ClickPosition.Y - 9, ClickPosition.X, ClickPosition.Y + 9, ClickColor, 2);
 	}
+	const float CenterX = Canvas->ClipX * 0.5f;
+	const float CenterY = Canvas->ClipY * 0.5f;
+	if (IsKeyAcquiredMessageVisible())
+	{
+		// 用实际字体测量整行文字，再按宽高各减去一半，确保文字本身位于视口正中央。
+		// 黑色阴影保证浅色地面上的可读性；提示期间不画重叠的准星，切换手办模式仍显示提示。
+		const FString Message = TEXT("已获得钥匙");
+		UFont* Font = GEngine->GetLargeFont();
+		// 引擎默认的 LargeFont 也可能只有 10 pt，单独放大获得提示，确保主视口里可以直接读到。
+		const float TextScale = 2.0f;
+		float TextWidth = 0.0f, TextHeight = 0.0f;
+		GetTextSize(Message, TextWidth, TextHeight, Font, TextScale);
+		FCanvasTextItem TextItem(FVector2D(CenterX - TextWidth * 0.5f, CenterY - TextHeight * 0.5f),
+			FText::FromString(Message), Font, FLinearColor::White);
+		TextItem.Scale = FVector2D(TextScale);
+		TextItem.EnableShadow(FLinearColor::Black);
+		Canvas->DrawItem(TextItem);
+		return;
+	}
 	// 普通模式的准星与 E 键世界射线一致；手办模式则使用可见鼠标光标选点。
 	if (bMiniatureMode)
 		return;
-	const float CenterX = Canvas->ClipX * 0.5f;
-	const float CenterY = Canvas->ClipY * 0.5f;
 	DrawLine(CenterX - 5, CenterY, CenterX + 5, CenterY, FLinearColor::White);
 	DrawLine(CenterX, CenterY - 5, CenterX, CenterY + 5, FLinearColor::White);
 }

@@ -4,12 +4,14 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "DreamHUD.h"
 #include "DreamPlayerController.h"
 #include "DreamSceneCapturePresentationComponent.h"
 #include "DreamShoulderCameraComponent.h"
 #include "EnhancedInputComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
+#include "GameFramework/PlayerController.h"
 #include "GameFramework/SpringArmComponent.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
@@ -257,4 +259,15 @@ void ADreamCharacter::DoJumpEnd()
 void ADreamCharacter::MoveOnGravityPlane(const FVector2D& Input)
 {
 	DoMove(Input.X, Input.Y);
+}
+
+void ADreamCharacter::AcquireKey()
+{
+	// 先保存玩法状态，再尝试显示提示；即使关卡未配置 DreamHUD，获得钥匙的结果也不会丢失。
+	bHasKey = true;
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+	{
+		if (ADreamHUD* HUD = Cast<ADreamHUD>(PlayerController->GetHUD()))
+			HUD->ShowKeyAcquiredMessage();
+	}
 }
