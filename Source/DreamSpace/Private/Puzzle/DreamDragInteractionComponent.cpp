@@ -19,8 +19,9 @@ void UDreamDragInteractionComponent::BeginPlay()
 	Super::BeginPlay();
 	if (!EnsureReference())
 	{
-		UE_LOG(LogDreamSpace, Warning, TEXT("自由交互组件 [%s]：请配置同一 Actor 的枢轴点，并将根组件设为 Movable。"),
-			*GetName());
+		UE_LOG(LogDreamSpace, Warning,
+			TEXT("自由交互组件 [%s]：根组件必须为 Movable%s。"), *GetName(),
+			RequiresPivot() ? TEXT("，并配置同一 Actor 的枢轴点") : TEXT(""));
 	}
 }
 
@@ -41,7 +42,7 @@ void UDreamDragInteractionComponent::TickComponent(
 	float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	if (bDragging && (!DragInteractor.IsValid() || !IsValid(CachedPivot.Get()) || !IsActive()))
+	if (bDragging && (!DragInteractor.IsValid() || (RequiresPivot() && !IsValid(CachedPivot.Get())) || !IsActive()))
 		EndDrag();
 	if (bReferenceInitialized && DreamPuzzleDebug::IsPivotDebugDrawEnabled())
 		DrawDebugRange();
@@ -74,8 +75,8 @@ void UDreamDragInteractionComponent::UpdateDrag(
 	// 不能在拖动途中补做参考系初始化，否则枢轴随 Actor 移动后会悄悄改变范围零点。
 	const AActor* Owner = GetOwner();
 	const USceneComponent* Root = Owner ? Owner->GetRootComponent() : nullptr;
-	if (!IsValid(Owner) || !DragInteractor.IsValid() || !IsValid(CachedPivot.Get()) || !IsActive() || !Root ||
-		Root->Mobility != EComponentMobility::Movable)
+	if (!IsValid(Owner) || !DragInteractor.IsValid() || (RequiresPivot() && !IsValid(CachedPivot.Get())) ||
+		!IsActive() || !Root || Root->Mobility != EComponentMobility::Movable)
 	{
 		EndDrag();
 		return;
@@ -136,14 +137,15 @@ bool UDreamDragInteractionComponent::EnsureReference()
 	const USceneComponent* Root = Owner ? Owner->GetRootComponent() : nullptr;
 	if (!IsValid(Owner) || !Root || Root->Mobility != EComponentMobility::Movable)
 		return false;
-	if (bReferenceInitialized && IsValid(CachedPivot.Get()))
+	if (bReferenceInitialized && (!RequiresPivot() || IsValid(CachedPivot.Get())))
 		return true;
-	CachedPivot = ResolvePivot();
-	if (!IsValid(CachedPivot.Get()))
+	CachedPivot = RequiresPivot() ? ResolvePivot() : nullptr;
+	if (RequiresPivot() && !IsValid(CachedPivot.Get()))
 		return false;
 
-	ReferencePivotWorld = CachedPivot->GetComponentLocation();
-	const FQuat Rotation = CachedPivot->GetComponentQuat();
+	// 不依赖枢轴的派生组件使用 Actor 的局部坐标系；既有平移/旋转组件仍走原来的枢轴路径。
+	ReferencePivotWorld = RequiresPivot() ? CachedPivot->GetComponentLocation() : Owner->GetActorLocation();
+	const FQuat Rotation = RequiresPivot() ? CachedPivot->GetComponentQuat() : Owner->GetActorQuat();
 	switch (InteractionAxis)
 	{
 	case EDreamPivotRotationAxis::X:

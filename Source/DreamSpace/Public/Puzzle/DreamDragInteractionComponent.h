@@ -36,7 +36,7 @@ public:
 	 * 同一组件同时只接受一个操作者；重新抓取不会重建范围，也不会让物体跳到鼠标位置。
 	 */
 	UFUNCTION(BlueprintCallable, Category = "自由交互")
-	bool BeginDrag(AActor* Interactor, const FVector& RayOrigin, const FVector& RayDirection);
+	virtual bool BeginDrag(AActor* Interactor, const FVector& RayOrigin, const FVector& RayDirection);
 
 	/**
 	 * 提交当前鼠标对应的世界射线。PointerDelta 是本帧屏幕像素增量，X 向右、Y 向下。
@@ -48,7 +48,7 @@ public:
 
 	/** 结束拖动并保留最后实际到达的姿态；不会自动回弹或吸附到固定步长。 */
 	UFUNCTION(BlueprintCallable, Category = "自由交互")
-	void EndDrag();
+	virtual void EndDrag();
 
 	/** 映射暂时失效时丢弃输入基线；恢复后的第一帧只重新采样，避免跨出手办面片再回来时跳变。 */
 	void SuspendDragInput() { bNeedsNewDragSample = true; }
@@ -71,6 +71,12 @@ public:
 	bool ReinitializeReference();
 
 protected:
+	/**
+	 * 一般自由机关需要独立枢轴；二阶魔方等内部运动组件可使用所属 Actor 的局部坐标系。
+	 * 默认保持原有枢轴要求，只有明确覆盖此函数的派生类才允许省略枢轴组件。
+	 */
+	virtual bool RequiresPivot() const { return true; }
+
 	/** 派生类构造函数可选择默认轴；此属性在两个具体组件的详情面板中共用。 */
 	UPROPERTY(EditAnywhere, Category = "自由交互|枢轴", meta = (DisplayName = "运动轴"))
 	EDreamPivotRotationAxis InteractionAxis = EDreamPivotRotationAxis::X;
