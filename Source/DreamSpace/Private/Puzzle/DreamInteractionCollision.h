@@ -14,7 +14,9 @@ namespace DreamInteractionCollision
 	 * 检查 Actor 从当前姿态到目标姿态的运动。
 	 * 返回 1 表示整段可以通过；小于 1 表示受阻，数值是平移扫掠所能到达的安全比例。
 	 * 如果阻挡来自目标姿态的旋转重叠，则保守地返回 0，由调用方留在上一安全姿态。
-	 * IgnoredActors 用于排除与机关同步搬运的站立角色；默认留空，维持原有碰撞行为。
+	 * 随根组件移动的子 Actor 一起查询，组内互相忽略，组外仍阻挡。
+	 * 纯平移允许离开已有重叠或近似切向滑动，向内运动和新的障碍仍阻挡。
+	 * IgnoredActors 用于排除与机关同步搬运的站立角色；默认留空。
 	 */
 	float FindSafeMoveFraction(const AActor* Actor, const FTransform& TargetActorTransform,
 		TConstArrayView<AActor*> IgnoredActors = {});

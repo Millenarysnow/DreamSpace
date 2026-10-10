@@ -72,6 +72,11 @@ Actor 原点与轴线之间的初始垂直偏移会被保留，不会抓取后�
 开启运动碰撞时，移动件须启用 **Query** 碰撞，并与障碍物互相设置 **Block**。
 根组件可以是无碰撞 SceneComponent，随根移动的附属网格/碰撞盒都会参加查询。
 
+附着的子 Actor（包括递归子 Actor）与父级作为同一运动组检测，组内互相忽略，
+子 Actor 的碰撞体仍会检测外部障碍。开局已经重叠的碰撞体在纯平移时可以向外离开或
+沿接触面滑动；凸体法线约 0.057° 内的微小偏斜按切向处理。向重叠内部深入、
+遇到新的外部障碍和旋转重叠仍阻挡，因此保留运动碰撞时不保证整个配置范围都畅通。
+
 平移每次请求检查完整扫掠，受阻停在接触面之前。旋转沿带符号角度细分：每步最多 2°，
 并将最远碰撞点每步弧长限制到约 2 cm。遇阻后停在上一安全角度，可立即反向离开。
 与步进组件不同，自由组件没有“本次完整步进失败”的回弹逻辑。
@@ -127,3 +132,17 @@ Actor 原点与轴线之间的初始垂直偏移会被保留，不会抓取后�
 `DreamSpace Win64 Development` 编译成功；完整 `DreamSpace` 套件 27 项全部通过，
 包含新增的 9 项自由交互测试。日志为 `Saved/Logs/DragInteractionRegression.log`，
 结构化报告为 `Saved/Automation/DragInteractionRegression/index.json`。
+
+2026-10-11：修正初始重叠和附着子 Actor 导致的拖动锁死。`DreamSpaceEditor Win64 Development`
+编译成功，`DreamSpace.Puzzle` 28 项全部通过，新增测试覆盖侧面重叠滑动/反向、向外脱离、
+向内阻挡、再次接近、新障碍，以及子/孙 Actor 的组内忽略和外部碰撞。
+报告：`Saved/BarrierDragCheck/RegressionFinal/index.json`。
+
+`TEST` 的独立 PIE 副本验证了 Barrier 01、02、两个 04 实例、06、07 在保留碰撞时
+均能至少沿一个方向产生位移，几何射线和退化视角输入均通过。证据：
+`Saved/BarrierDragCheck/verification-pie.json`。验证未保存地图、蓝图或网格。
+这是脚本驱动的组件验证，未进行人工鼠标手感验收。
+
+当前摆放仍有真实碰撞限制：Barrier 01 负向约 20.22 cm 后接触 Barrier 02；
+Barrier 02 正向进入 RotateRoom 的碰撞而受阻；带管线的 `Barrier_04_C_0` 与 Barrier 01
+有初始重叠，负向可以离开，正向/回程增加重叠时仍阻挡。未修改这些关卡碰撞或摆放设置。

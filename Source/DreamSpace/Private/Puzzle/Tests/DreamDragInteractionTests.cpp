@@ -199,6 +199,74 @@ bool FDreamDragTranslationCollisionTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamDragInitialOverlapTest,
+	"DreamSpace.Puzzle.Drag.InitialOverlapAllowsEscapeAndSlide",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamDragInitialOverlapTest::RunTest(const FString& Parameters)
+{
+	{
+		FDragFixture Scene;
+		AddDragTestBox(Scene.Mover, FVector(10));
+		// 长墙保证去程和回程都处于同一个初始侧面重叠。
+		AActor* Wall = SpawnRootActor(Scene.World, FVector(0, 15, 0));
+		AddDragTestBox(Wall, FVector(200, 10, 10));
+		Wall->SetActorRotation(FRotator(0, 0.03f, 0));
+		AddDragTestBox(SpawnRootActor(Scene.World, FVector(50, 0, 0)), FVector(10));
+		UDreamDraggableComponent* Drag = AddInteraction<UDreamDraggableComponent>(Scene.Mover);
+		SetBool(Drag, TEXT("bConsiderCollision"), true);
+		const float Safe = Drag->SetTranslation(100.0f);
+		TestTrue(TEXT("沿已有重叠滑动时仍在新障碍前停止"), Safe > 20.0f && Safe < 30.0f);
+		TestTrue(TEXT("贴合滑动受阻后可立即反向"),
+			FMath::IsNearlyEqual(Drag->SetTranslation(-10.0f), -10.0f, 0.01f));
+	}
+	{
+		FDragFixture Scene;
+		AddDragTestBox(Scene.Mover, FVector(10));
+		AddDragTestBox(SpawnRootActor(Scene.World, FVector(15, 0, 0)), FVector(10));
+		UDreamDraggableComponent* Drag = AddInteraction<UDreamDraggableComponent>(Scene.Mover);
+		SetBool(Drag, TEXT("bConsiderCollision"), true);
+		TestTrue(TEXT("初始重叠仍阻止继续深入"), FMath::IsNearlyZero(Drag->SetTranslation(25.0f), 0.01f));
+		TestTrue(TEXT("初始重叠可以向外拖离"),
+			FMath::IsNearlyEqual(Drag->SetTranslation(-25.0f), -25.0f, 0.01f));
+		TestTrue(TEXT("离开重叠后再次接近不能重新穿入"), Drag->SetTranslation(0.0f) < -5.0f);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamDragAttachedCollisionTest,
+	"DreamSpace.Puzzle.Drag.AttachedActorsMoveTogetherAndBlockExternally",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamDragAttachedCollisionTest::RunTest(const FString& Parameters)
+{
+	FDragFixture Scene;
+	AddDragTestBox(Scene.Mover, FVector(10));
+	// 子 Actor 的根本身有碰撞，且与父级重叠；孙 Actor 验证递归运动组。
+	AActor* Child = Scene.World->SpawnActor<AActor>();
+	UBoxComponent* ChildRoot = AddDragTestBox(Child, FVector(10));
+	Child->SetRootComponent(ChildRoot);
+	Child->AttachToActor(Scene.Mover, FAttachmentTransformRules::KeepWorldTransform);
+	AActor* Grandchild = SpawnRootActor(Scene.World, FVector(0, 100, 0));
+	AddDragTestBox(Grandchild, FVector(10));
+	Grandchild->AttachToActor(Child, FAttachmentTransformRules::KeepWorldTransform);
+	UDreamDraggableComponent* Drag = AddInteraction<UDreamDraggableComponent>(Scene.Mover);
+	SetBool(Drag, TEXT("bConsiderCollision"), true);
+	TestTrue(TEXT("组内初始重叠不阻挡父级"), FMath::IsNearlyEqual(Drag->SetTranslation(25.0f), 25.0f, 0.01f));
+	TestTrue(TEXT("子 Actor 随父级移动"), Child->GetActorLocation().Equals(FVector(25, 0, 0), 0.01f));
+	TestTrue(TEXT("孙 Actor 随父级移动"), Grandchild->GetActorLocation().Equals(FVector(25, 100, 0), 0.01f));
+	AddDragTestBox(SpawnRootActor(Scene.World, FVector(75, 100, 0)), FVector(10));
+	const float GrandchildSafe = Drag->SetTranslation(100.0f);
+	TestTrue(TEXT("仅孙 Actor 路径上的障碍也阻挡整个运动组"), GrandchildSafe > 40.0f && GrandchildSafe < 55.0f);
+	Drag->SetTranslation(0.0f);
+	// 父级位于 Y=0，只有子 Actor 根经过这个新障碍。
+	Child->SetActorRelativeLocation(FVector(0, 200, 0));
+	AddDragTestBox(SpawnRootActor(Scene.World, FVector(50, 200, 0)), FVector(10));
+	const float ChildSafe = Drag->SetTranslation(100.0f);
+	TestTrue(TEXT("子 Actor 的碰撞根也检测外部障碍"), ChildSafe > 20.0f && ChildSafe < 30.0f);
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamDragRotationRangeTest,
 	"DreamSpace.Puzzle.Drag.RotationSignedAnglesAndFixedPivot",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

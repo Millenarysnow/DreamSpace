@@ -2,10 +2,18 @@
 
 !/.git*
 
+!/Config/
 !/Config/**
+!/Content/
 !/Content/**
+!/Source/
 !/Source/**
+!/Documents/
 !/Documents/**
+!/RawContent/
 !/RawContent/**
 
-!/*.uproject  
+!/*.uproject
+
+**/__pycache__/
+*.pyc
