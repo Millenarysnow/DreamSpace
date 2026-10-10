@@ -170,14 +170,15 @@ void UDreamSceneCapturePresentationComponent::RotateInspection(const FVector2D& 
 	if (!bInspectionActive || !bPresentationActive || PointerDelta.ContainsNaN() || PointerDelta.IsNearlyZero())
 		return;
 
-	// 鼠标向右/下拖动时，让模型向右/下转动，因此捕获镜头使用相反的水平公转。
+	// 水平拖动使用捕获镜头上轴的正向公转，让锚点前方的模型表面随光标向右移动。
+	// 垂直拖动仍使用右轴的正向旋转，使光标向下时模型表面向下移动；两轴符号分别处理。
 	// 两根转轴都来自当前捕获镜头，始终对应画面的上/右方向，不依赖世界 Z 或角色重力。
 	// 不累计欧拉 Pitch/Yaw，也不夹紧俯仰：连续拖动可越过极点，归一化避免长时间操作的漂移。
 	const float RadiansPerPixel = FMath::DegreesToRadians(FMath::Max(InspectionRotationDegreesPerPixel, 0.01f));
 	// 合并二维输入为一次轴角旋转，同方向的斜拖分成多帧后仍得到相同姿态。
 	// 若逐帧先 Yaw 再 Pitch，两次非交换旋转会让同一斜线在不同采样频率下产生额外滚转。
 	const FVector AngularDelta = InspectionCaptureRotation.GetRightVector() * PointerDelta.Y
-		- InspectionCaptureRotation.GetUpVector() * PointerDelta.X;
+		+ InspectionCaptureRotation.GetUpVector() * PointerDelta.X;
 	const FQuat Turn(AngularDelta.GetSafeNormal(), AngularDelta.Size() * RadiansPerPixel);
 	InspectionCaptureRotation = (Turn * InspectionCaptureRotation).GetNormalized();
 	UpdateCaptureView();

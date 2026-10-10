@@ -303,7 +303,20 @@ bool FDreamMiniatureInspectionRotationTest::RunTest(const FString& Parameters)
 	Scene.Miniature->RotateInspection(FVector2D(120, 0));
 	Scene.Step();
 	TestFalse(TEXT("横向拖动确实改变捕获姿态"), Scene.Capture->GetActorTransform().Equals(InitialCapture, 0.001));
+	// 在锚点靠近镜头的一侧选取模型表面参考点，检查其屏幕运动方向。
+	// 只比较捕获姿态是否变化无法发现左右反向；相机局部 +Y 为屏幕右、+Z 为屏幕上。
+	const FVector HorizontalProbe = Scene.Anchor->GetActorLocation()
+		- InitialCapture.GetRotation().GetForwardVector() * CaptureDistance * 0.25f;
+	const FVector AfterRightDrag = Scene.Capture->GetActorTransform().InverseTransformPosition(HorizontalProbe);
+	TestTrue(TEXT("向右拖动时模型表面在画面中向右移动"), AfterRightDrag.X > 0.0 && AfterRightDrag.Y > 0.0);
 	const FQuat AfterHorizontal = Scene.Capture->GetActorQuat();
+	const FVector VerticalProbe = Scene.Anchor->GetActorLocation()
+		- AfterHorizontal.GetForwardVector() * CaptureDistance * 0.25f;
+	Scene.Miniature->RotateInspection(FVector2D(0, 120));
+	const FVector AfterDownDrag = Scene.Capture->GetActorTransform().InverseTransformPosition(VerticalProbe);
+	TestTrue(TEXT("向下拖动仍让模型表面在画面中向下移动"), AfterDownDrag.X > 0.0 && AfterDownDrag.Z < 0.0);
+	// 撤销本次小角度垂直检查，继续使用原来的大角度输入验证越过极点。
+	Scene.Miniature->RotateInspection(FVector2D(0, -120));
 	Scene.Miniature->RotateInspection(FVector2D(0, 760));
 	Scene.Step();
 	const float VerticalAngle = FMath::RadiansToDegrees(AfterHorizontal.AngularDistance(Scene.Capture->GetActorQuat()));
