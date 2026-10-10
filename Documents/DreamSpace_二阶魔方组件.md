@@ -176,9 +176,13 @@ E/手办左键的拖动方向与阈值手感、转动动画观感，以及 On Cu
 自动化可以验证数学、碰撞命中和输入生命周期，不能替代这些视觉与手感验收。
 
 2026-10-11 验证结果：UE 5.8.2 的 **DreamSpaceEditor Win64 Development** 与
-**DreamSpace Win64 Development** 编译通过；完整 `DreamSpace` 回归共 **55 项通过、0 项失败**，
-包含新增的 8 项魔方测试。报告为 `Saved/Automation/RubiksCubeRegression/index.json`，
-日志为 `Saved/Logs/RubiksCubeRegression.log`；自定义绑定的负向测试会有预期的无效配置警告。
+**DreamSpace Win64 Development** 均在 `-ForceUnity -DisableAdaptiveUnity` 下编译通过。
+已检查两个目标生成的 `Module.DreamSpace.cpp`，确认同时包含拖动测试与魔方测试；
+关闭自适应排除后，修改中的测试文件也参与合并编译，可以发现匿名命名空间辅助函数的重定义冲突。
+编译日志为 `Saved/Logs/RubiksCubeUnityEditorBuild.log` 和 `Saved/Logs/RubiksCubeUnityGameBuild.log`。
+完整 `DreamSpace` 回归共 **55 项通过、0 项失败**，包含新增的 8 项魔方测试。
+报告为 `Saved/Automation/RubiksCubeUnityRegression/index.json`，
+日志为 `Saved/Logs/RubiksCubeUnityRegression.log`；自定义绑定的负向测试会有预期的无效配置警告。
 
 通过独立 D3D12 编辑器实际渲染并检查了还原、正 Z 层转动完成、打乱后的三张图像，
 角块对齐和颜色随层转动均正常。文件位于 `Saved/RubiksCube/RenderChecks/`，

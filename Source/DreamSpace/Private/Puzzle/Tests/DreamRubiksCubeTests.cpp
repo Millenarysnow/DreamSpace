@@ -68,14 +68,16 @@ struct FRubiksFixture
 	}
 };
 
-void SetFloat(UObject* Object, const TCHAR* Name, float Value)
+// Unity Build 会把多个测试 cpp 合并到同一个翻译单元；这里使用魔方专属名称，
+// 避免与 DreamDragInteractionTests.cpp 等测试中的同名反射辅助函数发生重定义。
+void SetRubiksFloat(UObject* Object, const TCHAR* Name, float Value)
 {
 	FFloatProperty* Property = FindFProperty<FFloatProperty>(Object->GetClass(), Name);
 	check(Property);
 	Property->SetPropertyValue_InContainer(Object, Value);
 }
 
-void SetBool(UObject* Object, const TCHAR* Name, bool Value)
+void SetRubiksBool(UObject* Object, const TCHAR* Name, bool Value)
 {
 	FBoolProperty* Property = FindFProperty<FBoolProperty>(Object->GetClass(), Name);
 	check(Property);
@@ -225,7 +227,7 @@ bool FDreamRubiksShuffleTest::RunTest(const FString& Parameters)
 	for (int32 Index = 0; Index < 3; ++Index)
 		TestTrue(TEXT("编辑器重建按钮可以反复使用"), Scene.Cube->RebuildCube());
 	TestEqual(TEXT("重建不会累积重复网格或重复碰撞"), CountMeshes(Scene.Owner), 32);
-	SetBool(Scene.Cube, TEXT("bShuffleOnBeginPlay"), true);
+	SetRubiksBool(Scene.Cube, TEXT("bShuffleOnBeginPlay"), true);
 	Scene.Cube->BeginPlay();
 	TestFalse(TEXT("组件 BeginPlay 的开局打乱配置生效"), Scene.Cube->IsSolved());
 	Scene.Cube->DestroyComponent();
@@ -240,7 +242,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamRubiksAnimationTest,
 bool FDreamRubiksAnimationTest::RunTest(const FString& Parameters)
 {
 	FRubiksFixture Scene;
-	SetFloat(Scene.Cube, TEXT("TurnDuration"), 1.0f);
+	SetRubiksFloat(Scene.Cube, TEXT("TurnDuration"), 1.0f);
 	const TArray<FTransform> Initial = Scene.Snapshot();
 	TestTrue(TEXT("动画可以开始"), Scene.Cube->RotateLayer(EDreamRubiksCubeAxis::Z, 1, 1));
 	Scene.Cube->TickComponent(0.5f, LEVELTICK_All, nullptr);
@@ -279,7 +281,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamRubiksGestureTest,
 bool FDreamRubiksGestureTest::RunTest(const FString& Parameters)
 {
 	FRubiksFixture Scene;
-	SetFloat(Scene.Cube, TEXT("TurnDuration"), 0.0f);
+	SetRubiksFloat(Scene.Cube, TEXT("TurnDuration"), 0.0f);
 	const TArray<FTransform> Initial = Scene.Snapshot();
 	// 整体移动、旋转和非等比正缩放后，局部面方向及命中的格子仍应正确。
 	Scene.Owner->SetActorTransform(FTransform(FRotator(25, 40, 15), FVector(400, -250, 90), FVector(1.5, 0.8, 2.0)));
@@ -341,7 +343,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamRubiksCustomCornersTest,
 bool FDreamRubiksCustomCornersTest::RunTest(const FString& Parameters)
 {
 	FRubiksFixture Scene;
-	SetBool(Scene.Cube, TEXT("bGenerateVisuals"), false);
+	SetRubiksBool(Scene.Cube, TEXT("bGenerateVisuals"), false);
 	TArray<USceneComponent*> Roots;
 	for (int32 Index = 0; Index < 8; ++Index)
 	{
@@ -389,7 +391,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamRubiksControllerTest,
 bool FDreamRubiksControllerTest::RunTest(const FString& Parameters)
 {
 	FRubiksFixture Scene;
-	SetFloat(Scene.Cube, TEXT("TurnDuration"), 0.0f);
+	SetRubiksFloat(Scene.Cube, TEXT("TurnDuration"), 0.0f);
 	FActorSpawnParameters Spawn;
 	Spawn.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	ADreamCharacter* Character =
