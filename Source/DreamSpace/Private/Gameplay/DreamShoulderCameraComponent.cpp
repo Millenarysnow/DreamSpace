@@ -91,6 +91,74 @@ FTransform UDreamShoulderCameraComponent::GetIdealCameraTransform(float InArmLen
 		Pivot + Rotation.RotateVector(SocketOffset - FVector(FMath::Max(InArmLength, 0.0f), 0.0f, 0.0f)));
 }
 
+FQuat UDreamShoulderCameraComponent::MakeMiniatureInspectionRotation(const FVector& ViewDirection) const
+{
+	const FVector Up = GetGravityUp();
+	FVector Horizontal = FVector::VectorPlaneProject(ViewDirection, Up).GetSafeNormal();
+	// 探索镜头恰好从头顶/脚底看下来时，水平投影会退化；沿角色正前方建立稳定的观察方向。
+	if (Horizontal.IsNearlyZero())
+		Horizontal = FVector::VectorPlaneProject(GetOwner()->GetActorForwardVector(), Up).GetSafeNormal();
+	if (Horizontal.IsNearlyZero())
+		Horizontal = FRotationMatrix::MakeFromZ(Up).GetUnitAxis(EAxis::X);
+	const float Angle = FMath::DegreesToRadians(FMath::Clamp(MiniatureLookDownAngle, 0.0f, 60.0f));
+	const FVector Forward = Horizontal * FMath::Cos(Angle) - Up * FMath::Sin(Angle);
+	return FRotationMatrix::MakeFromXZ(Forward, Up).ToQuat();
+}
+
+void UDreamShoulderCameraComponent::BeginMiniatureCameraBlend()
+{
+	const FTransform OwnerTransform = GetOwner()->GetActorTransform();
+	// Socket 是已经过避障并实际显示出来的镜头。中途反向切换也从这里开始，不能复用旧动画起点。
+	MiniatureBlendStartLocal = GetSocketTransform(USpringArmComponent::SocketName, RTS_World)
+		.GetRelativeTransform(OwnerTransform);
+	MiniatureBlendStartPivotLocal = OwnerTransform.InverseTransformPosition(
+		bHasPublishedCameraPose ? PublishedCameraPivot : GetComponentLocation() + TargetOffset);
+	MiniatureCameraBlendElapsed = 0.0f;
+	MiniatureCameraBlendDuration = FMath::Max(MiniatureTransitionDuration, 0.0f);
+	bMiniatureCameraBlending = MiniatureCameraBlendDuration > UE_SMALL_NUMBER;
+	MiniatureCameraBlendAlpha = bMiniatureCameraBlending ? 0.0f : 1.0f;
+}
+
+void UDreamShoulderCameraComponent::PublishCameraPose(
+	const FVector& Pivot, const FVector& Location, const FQuat& Rotation, bool bDoTrace, float DeltaTime)
+{
+	FVector ActualPivot = Pivot;
+	FVector ActualLocation = Location;
+	FQuat ActualRotation = Rotation;
+	if (bMiniatureCameraBlending)
+	{
+		MiniatureCameraBlendElapsed += FMath::Max(DeltaTime, 0.0f);
+		const float Time = FMath::Clamp(MiniatureCameraBlendElapsed / MiniatureCameraBlendDuration, 0.0f, 1.0f);
+		// 有限时长的缓入缓出曲线，起止速度均为零；不依赖每帧 Lerp 系数，因此不同帧率同时抵达。
+		MiniatureCameraBlendAlpha = Time * Time * (3.0f - 2.0f * Time);
+		const FTransform OwnerTransform = GetOwner()->GetActorTransform();
+		const FTransform Start = MiniatureBlendStartLocal * OwnerTransform;
+		ActualPivot = FMath::Lerp(OwnerTransform.TransformPosition(MiniatureBlendStartPivotLocal), Pivot, MiniatureCameraBlendAlpha);
+		ActualLocation = FMath::Lerp(Start.GetLocation(), Location, MiniatureCameraBlendAlpha);
+		ActualRotation = FQuat::Slerp(Start.GetRotation(), Rotation, MiniatureCameraBlendAlpha).GetNormalized();
+		if (bDoTrace)
+		{
+			// 安全的起终点不代表中间构图安全。先保证过渡枢轴可达，再对本帧镜头执行真实球扫掠。
+			const FCameraSweep PivotSweep = SweepCamera(Pivot, ActualPivot, ProbeSize);
+			ActualPivot = Pivot + (ActualPivot - Pivot).GetSafeNormal() * PivotSweep.SafeDistance;
+			const FVector Ray = ActualLocation - ActualPivot;
+			const FCameraSweep CameraSweep = SweepCamera(ActualPivot, ActualLocation, ProbeSize);
+			const FVector SafeLocation = ActualPivot + Ray.GetSafeNormal() * CameraSweep.SafeDistance;
+			bIsCameraFixed |= !SafeLocation.Equals(ActualLocation, 0.1f);
+			ActualLocation = SafeLocation;
+		}
+		if (Time >= 1.0f)
+			bMiniatureCameraBlending = false;
+	}
+	PublishedCameraPivot = ActualPivot;
+	bHasPublishedCameraPose = true;
+	const FTransform RelativeCamera = FTransform(ActualRotation, ActualLocation).GetRelativeTransform(GetComponentTransform());
+	RelativeSocketLocation = RelativeCamera.GetLocation();
+	RelativeSocketRotation = RelativeCamera.GetRotation();
+	UpdateChildTransforms();
+	UpdateOwnerClipping(ActualLocation, ActualRotation.Rotator(), DeltaTime);
+}
+
 bool UDreamShoulderCameraComponent::BeginMiniatureFocus(
 	UDreamSceneCapturePresentationComponent* Miniature, const FMinimalViewInfo& PlayerPOV)
 {
@@ -99,21 +167,29 @@ bool UDreamShoulderCameraComponent::BeginMiniatureFocus(
 	const FVector Forward = (Miniature->GetDisplayCenter() - PlayerPOV.Location).GetSafeNormal();
 	if (Forward.IsNearlyZero())
 		return false;
-	const FQuat Rotation = FRotationMatrix::MakeFromXZ(
-		Forward, PlayerPOV.Rotation.RotateVector(FVector::UpVector)).ToQuat();
+	const FQuat Rotation = MakeMiniatureInspectionRotation(Forward);
+	BeginMiniatureCameraBlend();
 	MiniatureFocusLocalRotation = GetOwner()->GetActorQuat().Inverse() * Rotation;
 	MiniatureFocusTarget = Miniature;
-	// 不等待下一次 Tick：Tab 输入发生后，本帧的主视口和光标射线即可使用居中后的真实相机。
+	// 先建立观察目标，但以零时间发布过渡起点；按 Tab 的这一帧仍保持原姿态，下一帧才开始移动。
 	UpdateMiniatureFocus(bDoCollisionTest, 0.0f);
 	return true;
 }
 
-void UDreamShoulderCameraComponent::EndMiniatureFocus()
+void UDreamShoulderCameraComponent::EndMiniatureFocus(bool bBlend)
 {
-	if (MiniatureFocusTarget.IsExplicitlyNull())
+	if (MiniatureFocusTarget.IsExplicitlyNull() && bBlend)
 		return;
+	if (bBlend && IsRegistered() && IsActive())
+		BeginMiniatureCameraBlend();
+	else
+	{
+		bMiniatureCameraBlending = false;
+		MiniatureCameraBlendAlpha = 1.0f;
+	}
 	MiniatureFocusTarget.Reset();
-	ResetCameraState();
+	// 只重建探索跟随历史，保留局部剔除的当前强度；退出动画不能突然把贴近镜头的人物表面补回来。
+	bHasCameraState = false;
 	if (IsRegistered() && IsActive())
 		UpdateDesiredArmLocation(bDoCollisionTest, false, false, 0.0f);
 }
@@ -125,10 +201,11 @@ bool UDreamShoulderCameraComponent::UpdateMiniatureFocus(bool bDoTrace, float De
 	{
 		if (!MiniatureFocusTarget.IsExplicitlyNull())
 		{
-			// 弱引用失效也表示刚退出观察。先清理缓存，再由当前外层更新重建探索 Socket，
-			// 不递归调用相机更新，也不把观察期间未刷新的高度/碰撞历史继续带回探索。
+			// 目标失效属于生命周期清理，不继续播放对旧对象的动画；外层立即重建探索 Socket。
 			MiniatureFocusTarget.Reset();
-			ResetCameraState();
+			bHasCameraState = false;
+			bMiniatureCameraBlending = false;
+			MiniatureCameraBlendAlpha = 1.0f;
 		}
 		return false;
 	}
@@ -178,12 +255,8 @@ bool UDreamShoulderCameraComponent::UpdateMiniatureFocus(bool bDoTrace, float De
 	bIsCameraFixed = !Actual.Equals(UnfixedCameraPosition, 0.1f);
 
 	// 只沿中心视线收近，碰撞前后光轴都穿过显示面中心；不存在越肩偏移造成的偏心。
-	// 探索参数和历史不在这里修改，退出时由 ResetCameraState 建立新的探索参考。
-	const FTransform RelativeCamera = FTransform(Rotation, Actual).GetRelativeTransform(GetComponentTransform());
-	RelativeSocketLocation = RelativeCamera.GetLocation();
-	RelativeSocketRotation = RelativeCamera.GetRotation();
-	UpdateChildTransforms();
-	UpdateOwnerClipping(Actual, Rotation.Rotator(), DeltaTime);
+	// 探索参数和历史不在这里修改；公共发布入口只平滑 Tab 切换，不影响右键展示旋转。
+	PublishCameraPose(Center, Actual, Rotation, bDoTrace, DeltaTime);
 	if (bDreamShoulderCameraDebug)
 		DrawCameraDebug(Center, UnfixedCameraPosition, Actual, Sweep);
 	return true;
@@ -342,11 +415,7 @@ void UDreamShoulderCameraComponent::UpdateDesiredArmLocation(
 	PreviousArmOrigin = Anchor;
 	PreviousDesiredRot = Rotation;
 	// 发布基类 Socket 缓存即可驱动 FollowCamera，不需要在角色 Tick 或控制器里再次移动相机。
-	const FTransform RelativeCamera = FTransform(Rotation, Actual).GetRelativeTransform(GetComponentTransform());
-	RelativeSocketLocation = RelativeCamera.GetLocation();
-	RelativeSocketRotation = RelativeCamera.GetRotation();
-	UpdateChildTransforms();
-	UpdateOwnerClipping(Actual, Rotation, Step);
+	PublishCameraPose(CollisionPivot, Actual, Rotation.Quaternion(), bDoTrace, Step);
 	if (bDreamShoulderCameraDebug)
 		DrawCameraDebug(CollisionPivot, UnfixedCameraPosition, Actual, ActualSweep);
 }
@@ -475,12 +544,17 @@ void UDreamShoulderCameraComponent::RestoreOwnerClipMaterials()
 void UDreamShoulderCameraComponent::ResetCameraState()
 {
 	bHasCameraState = false;
+	bMiniatureCameraBlending = false;
+	MiniatureCameraBlendAlpha = 1.0f;
+	bHasPublishedCameraPose = false;
 	RestoreOwnerClipMaterials();
 }
 
 void UDreamShoulderCameraComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	MiniatureFocusTarget.Reset();
+	bMiniatureCameraBlending = false;
+	MiniatureCameraBlendAlpha = 1.0f;
 	RestoreOwnerClipMaterials();
 	Super::EndPlay(EndPlayReason);
 }
@@ -507,6 +581,7 @@ void UDreamShoulderCameraComponent::ApplyWorldOffset(const FVector& InOffset, bo
 	PreviousAnchor += InOffset;
 	PreviousOwnerLocation += InOffset;
 	ObserverPivot += InOffset;
+	PublishedCameraPivot += InOffset;
 }
 
 void UDreamShoulderCameraComponent::DrawCameraDebug(

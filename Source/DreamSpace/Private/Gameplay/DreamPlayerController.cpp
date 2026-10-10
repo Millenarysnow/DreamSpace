@@ -74,7 +74,7 @@ void ADreamPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
 	EndActiveDrag();
 	if (bMiniatureInteractionMode)
-		SetMiniatureInteractionMode(false);
+		SetMiniatureInteractionMode(false, false);
 
 	// 退出时移除项目交互和官方模板映射，避免 PIE 的下一次会话继承旧上下文。
 	if (GetLocalPlayer())
@@ -274,7 +274,7 @@ void ADreamPlayerController::ToggleMiniatureInteractionMode()
 	SetMiniatureInteractionMode(!bMiniatureInteractionMode);
 }
 
-void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled)
+void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled, bool bBlendCamera)
 {
 	if (bMiniatureInteractionMode == bEnabled || (bEnabled && !IsLocalController()))
 		return;
@@ -293,7 +293,7 @@ void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled)
 			ControlledCharacter->FollowCamera->GetCameraView(0.0f, POV);
 			if (!Camera->BeginMiniatureFocus(Miniature, POV))
 			{
-				Miniature->EndInspection();
+				Miniature->EndInspection(false);
 				return;
 			}
 			InspectedMiniature = Miniature;
@@ -314,11 +314,11 @@ void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled)
 	}
 	else
 	{
-		// 先恢复 FollowCamera 的探索 Socket，再恢复窗口捕获，避免捕获使用仍在近处的聚焦相机。
+		// 先启动主镜头的返回动画，再让捕获镜头读取同一进度。玩法输入立即恢复，镜头继续平滑返回。
 		if (UDreamShoulderCameraComponent* Camera = MiniatureFocusCamera.Get())
-			Camera->EndMiniatureFocus();
+			Camera->EndMiniatureFocus(bBlendCamera);
 		if (UDreamSceneCapturePresentationComponent* Miniature = InspectedMiniature.Get())
-			Miniature->EndInspection();
+			Miniature->EndInspection(bBlendCamera);
 		MiniatureFocusCamera.Reset();
 		InspectedMiniature.Reset();
 		if (bMiniatureInputLocked)
@@ -361,6 +361,9 @@ bool ADreamPlayerController::BeginMiniatureRotationRay(const FVector& ViewOrigin
 	UDreamSceneCapturePresentationComponent* Miniature = InspectedMiniature.Get();
 	if (!bMiniatureInteractionMode || bRotatingMiniature || IsDraggingInteraction()
 		|| !Miniature || !Miniature->IsInspecting() || !GetWorld())
+		return false;
+	// 取景过渡完成后再允许抓取，避免鼠标位移与自动旋转叠加，让第一下拖动产生跳变。
+	if (MiniatureFocusCamera.IsValid() && MiniatureFocusCamera->IsMiniatureCameraBlending())
 		return false;
 	FVector DisplayHit, CaptureOrigin, CaptureDirection;
 	FString Reason;
@@ -454,6 +457,9 @@ void ADreamPlayerController::InteractWithMiniature()
 void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrigin, const FVector& ViewRayDirection)
 {
 	if (!GetWorld() || IsDraggingInteraction() || bRotatingMiniature)
+		return;
+	// 自动构图移动期间不开始左键机关/取出交互，否则抓取参考射线会跟着镜头移动。
+	if (MiniatureFocusCamera.IsValid() && MiniatureFocusCamera->IsMiniatureCameraBlending())
 		return;
 	const ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
 	const UDreamSceneCapturePresentationComponent* Miniature =
@@ -666,7 +672,7 @@ void ADreamPlayerController::PlayerTick(float DeltaTime)
 	if (bMiniatureInputLocked && (!InspectedMiniature.IsValid() || !MiniatureFocusCamera.IsValid()
 		|| InspectedMiniature->GetOwner() != GetPawn() || !InspectedMiniature->IsInspecting()
 		|| !MiniatureFocusCamera->IsActive() || GetViewTarget() != GetPawn()))
-		SetMiniatureInteractionMode(false);
+		SetMiniatureInteractionMode(false, false);
 	UpdateActiveDrag();
 	UpdateMiniatureRotation();
 }
@@ -830,7 +836,7 @@ void ADreamPlayerController::EndActiveDrag(bool bTryCommitMiniatureExtract)
 void ADreamPlayerController::OnUnPossess()
 {
 	if (bMiniatureInteractionMode)
-		SetMiniatureInteractionMode(false);
+		SetMiniatureInteractionMode(false, false);
 	EndActiveDrag();
 	Super::OnUnPossess();
 }

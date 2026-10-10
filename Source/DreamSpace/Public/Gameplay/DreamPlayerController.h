@@ -91,7 +91,8 @@ private:
 	void CancelMiniatureDrag();
 	/** Tab 切换居中观察：进入时锁住探索输入，左键操作机关，右键旋转手办展示角度。 */
 	void ToggleMiniatureInteractionMode();
-	void SetMiniatureInteractionMode(bool bEnabled);
+	/** 普通 Tab 平滑切换镜头；生命周期退出传 false，立即终止旧角色上的过渡。 */
+	void SetMiniatureInteractionMode(bool bEnabled, bool bBlendCamera = true);
 	/** 右键必须从可见显示面内开始；抓取后允许光标越过面片边缘，松开即停止旋转。 */
 	void BeginMiniatureRotation();
 	bool BeginMiniatureRotationRay(const FVector& ViewOrigin, const FVector& ViewDirection);
@@ -115,6 +116,7 @@ private:
 	friend class FDreamMiniatureExtractionControllerTest;
 	friend class FDreamKeyPickupControllerTest;
 	friend class FDreamMiniatureFocusLifecycleTest;
+	friend class FDreamMiniatureFocusTransitionTest;
 	friend class FDreamMiniatureInspectionRotationTest;
 	friend class FDreamMiniatureGameplayRenderTest;
 	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */

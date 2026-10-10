@@ -89,10 +89,22 @@ namespace
 			return View;
 		}
 
-		void Step()
+		void Step(float DeltaTime = 1.0f / 60.0f)
 		{
-			Camera->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
-			Miniature->TickComponent(1.0f / 60.0f, LEVELTICK_All, nullptr);
+			Camera->TickComponent(DeltaTime, LEVELTICK_All, nullptr);
+			Miniature->TickComponent(DeltaTime, LEVELTICK_All, nullptr);
+		}
+
+		/** 模拟真实 Tick 顺序和累计时间；投影/拾取断言要在 Tab 的构图动画结束后执行。 */
+		void Advance(float Seconds, int32 FPS = 60)
+		{
+			for (int32 Frame = 0; Frame < FMath::RoundToInt(Seconds * FPS); ++Frame)
+				Step(1.0f / FPS);
+		}
+
+		void Settle()
+		{
+			Advance(Camera->MiniatureTransitionDuration + 1.0f / 60.0f);
 		}
 
 		/** 创建真实碰撞目标：同时用于相机避障与旋转后左键命中验证。 */
@@ -131,6 +143,8 @@ bool FDreamMiniatureFocusLifecycleTest::RunTest(const FString& Parameters)
 	Scene.Controller->SetMiniatureInteractionMode(true);
 	TestTrue(TEXT("Tab 同时启用观察、居中与光标模式"), Scene.Controller->IsMiniatureInteractionMode()
 		&& Scene.Miniature->IsInspecting() && Scene.Camera->IsMiniatureFocused() && Scene.Controller->bShowMouseCursor);
+	TestTrue(TEXT("进入 Tab 的当帧保持当前探索姿态"), FTransform(Scene.POV().Rotation, Scene.POV().Location).Equals(Exploration, 0.01));
+	Scene.Settle();
 	const FMinimalViewInfo Focus = Scene.POV();
 	TestTrue(TEXT("主相机光轴穿过手办显示面的真实中心"), Focus.Rotation.Vector().Equals(
 		(Scene.Miniature->GetDisplayCenter() - Focus.Location).GetSafeNormal(), 0.0001));
@@ -161,6 +175,9 @@ bool FDreamMiniatureFocusLifecycleTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("松开左键不解除 Tab 或其它系统添加的输入锁"),
 		Scene.Controller->IsMoveInputIgnored() && Scene.Controller->IsLookInputIgnored());
 	Scene.Controller->SetMiniatureInteractionMode(false);
+	TestTrue(TEXT("退出 Tab 的当帧保持当前聚焦姿态"), FTransform(Scene.POV().Rotation, Scene.POV().Location).Equals(
+		FTransform(Focus.Rotation, Focus.Location), 0.01));
+	Scene.Settle();
 	TestTrue(TEXT("退出后恢复原探索相机姿态"), FTransform(Scene.POV().Rotation, Scene.POV().Location).Equals(Exploration, 0.01));
 	TestTrue(TEXT("探索肩位保持原来的配置"), Scene.Camera->SocketOffset.Equals(ShoulderOffset));
 	TestTrue(TEXT("退出 Tab 保留其它系统的输入锁"),
@@ -207,6 +224,107 @@ bool FDreamMiniatureFocusLifecycleTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureFocusTransitionTest,
+	"DreamSpace.Camera.Miniature.LookDownAndSmoothTransitions",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamMiniatureFocusTransitionTest::RunTest(const FString& Parameters)
+{
+	FMiniatureInspectionFixture Scene;
+	const FTransform Exploration(Scene.POV().Rotation, Scene.POV().Location);
+	const FTransform ExplorationCapture = Scene.Capture->GetActorTransform();
+	Scene.Controller->SetMiniatureInteractionMode(true);
+	TestTrue(TEXT("主镜头进入时不直接跳到终点"), FTransform(Scene.POV().Rotation, Scene.POV().Location).Equals(Exploration, 0.01));
+	TestTrue(TEXT("捕获角度进入时也不跳变"), Scene.Capture->GetActorTransform().Equals(ExplorationCapture, 0.01));
+	TestTrue(TEXT("Tab 开始播放有限时长过渡"), Scene.Camera->IsMiniatureCameraBlending());
+	const FVector BeginRay = Scene.Miniature->GetDisplayCenter() - Scene.POV().Location;
+	TestFalse(TEXT("镜头自动构图期间不开始右键抓取"), Scene.Controller->BeginMiniatureRotationRay(Scene.POV().Location, BeginRay));
+	Scene.Step(Scene.Camera->MiniatureTransitionDuration * 0.5f);
+	const FTransform EnterMiddle(Scene.POV().Rotation, Scene.POV().Location);
+	TestFalse(TEXT("经过半个过渡时长主镜头已连续移动"), EnterMiddle.Equals(Exploration, 0.01));
+	TestFalse(TEXT("经过半个过渡时长捕获取景也连续改变"), Scene.Capture->GetActorTransform().Equals(ExplorationCapture, 0.01));
+	Scene.Settle();
+	const FTransform Focus(Scene.POV().Rotation, Scene.POV().Location);
+	TestFalse(TEXT("中间帧没有提前抵达聚焦终点"), EnterMiddle.Equals(Focus, 0.01));
+	TestFalse(TEXT("到达聚焦终点后自动结束过渡"), Scene.Camera->IsMiniatureCameraBlending());
+	const FVector Up = -Scene.Character->GetCharacterMovement()->GetGravityDirection();
+	const float ExpectedDown = -FMath::Sin(FMath::DegreesToRadians(Scene.Camera->MiniatureLookDownAngle));
+	TestTrue(TEXT("主镜头按照配置角度稍向下俯视"), FMath::IsNearlyEqual(FVector::DotProduct(Focus.GetRotation().GetForwardVector(), Up), ExpectedDown, 0.0001));
+	TestTrue(TEXT("实际捕获取景也呈现同样的俯视角度"), FMath::IsNearlyEqual(FVector::DotProduct(Scene.Capture->GetActorForwardVector(), Up), ExpectedDown, 0.0001));
+	TestTrue(TEXT("俯视时主镜头位于手办中心上方"), FVector::DotProduct(Focus.GetLocation() - Scene.Miniature->GetDisplayCenter(), Up) > 0.0);
+
+	Scene.Miniature->RotateInspection(FVector2D(160, 90));
+	const FTransform RotatedCapture = Scene.Capture->GetActorTransform();
+	Scene.Controller->SetMiniatureInteractionMode(false);
+	TestTrue(TEXT("返回探索的当帧主镜头保持原姿态"), FTransform(Scene.POV().Rotation, Scene.POV().Location).Equals(Focus, 0.01));
+	TestTrue(TEXT("返回探索的当帧手办画面保持展示角度"), Scene.Capture->GetActorTransform().Equals(RotatedCapture, 0.01));
+	Scene.Step(Scene.Camera->MiniatureTransitionDuration * 0.5f);
+	const FTransform ReturnMiddle(Scene.POV().Rotation, Scene.POV().Location);
+	const FTransform ReturnCapture = Scene.Capture->GetActorTransform();
+	TestFalse(TEXT("返回探索时主镜头经过中间帧"), ReturnMiddle.Equals(Focus, 0.01) || ReturnMiddle.Equals(Exploration, 0.01));
+	TestTrue(TEXT("右键旋转后的退出轨道仍对准场景锚点"), Scene.Capture->GetActorForwardVector().Equals(
+		(Scene.Anchor->GetActorLocation() - Scene.Capture->GetActorLocation()).GetSafeNormal(), 0.0001));
+	// 返回过程中再次按 Tab，主镜头和捕获镜头都从正在显示的中间帧重新开始。
+	Scene.Controller->SetMiniatureInteractionMode(true);
+	TestTrue(TEXT("连续切换 Tab 不跳回上次起点"), FTransform(Scene.POV().Rotation, Scene.POV().Location).Equals(ReturnMiddle, 0.01));
+	TestTrue(TEXT("连续切换 Tab 保持捕获画面连续"), Scene.Capture->GetActorTransform().Equals(ReturnCapture, 0.01));
+	Scene.Settle();
+	Scene.Controller->SetMiniatureInteractionMode(false);
+	// 玩家在返回动画期间已可恢复探索，最终相机应追踪新的控制旋转，而不是返回一份过期的快照。
+	Scene.Controller->SetControlRotation(FRotator(-10, 25, 0));
+	Scene.Settle();
+	TestTrue(TEXT("退出终点跟随玩家最新探索视角"), Scene.POV().Rotation.Quaternion().Equals(Scene.Controller->GetControlRotation().Quaternion(), 0.0001));
+	TestTrue(TEXT("退出终点采用当前越肩构图"), Scene.POV().Location.Equals(Scene.Camera->GetIdealCameraTransform(Scene.Camera->GetSmoothedArmLength()).GetLocation(), 0.01));
+
+	Scene.Controller->SetControlRotation(FRotator::ZeroRotator);
+	Scene.Step();
+	const FVector OpenExploration = Scene.POV().Location;
+	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Settle();
+	const FVector OpenFocus = Scene.POV().Location;
+	Scene.Controller->SetMiniatureInteractionMode(false);
+	Scene.Settle();
+	// 把障碍放在两个安全终点之间；独立球重叠检查确认动画不会插值进入墙体。
+	UBoxComponent* Wall = Scene.Box((OpenExploration + OpenFocus) * 0.5f, FVector(3), ECC_Camera);
+	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Step(Scene.Camera->MiniatureTransitionDuration * 0.5f);
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DreamMiniatureTransitionCollisionTest), false, Scene.Character);
+	TestTrue(TEXT("过渡中间位置执行真实 Camera 避障"), Scene.Camera->IsCollisionFixApplied());
+	TestFalse(TEXT("过渡中间帧相机球不留在墙内"), Scene.World->OverlapBlockingTestByChannel(
+		Scene.POV().Location, FQuat::Identity, ECC_Camera, FCollisionShape::MakeSphere(Scene.Camera->ProbeSize), Params));
+	Wall->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Scene.Settle();
+	Scene.Controller->SetMiniatureInteractionMode(false, false);
+	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Advance(0.1f);
+	const FTransform BeforeGravity(Scene.POV().Rotation, Scene.POV().Location);
+	const FQuat Turn(FVector::ForwardVector, HALF_PI);
+	const FVector Translation(40, 20, 0);
+	Scene.Character->SetActorLocationAndRotation(Translation, Turn);
+	Scene.Character->GetCharacterMovement()->SetGravityDirection(Turn.RotateVector(FVector::DownVector));
+	Scene.Step(0.0f);
+	TestTrue(TEXT("过渡中角色搬运时起点和目标一起转移"), Scene.POV().Location.Equals(Translation + Turn.RotateVector(BeforeGravity.GetLocation()), 0.01)
+		&& Scene.POV().Rotation.Quaternion().Equals(Turn * BeforeGravity.GetRotation(), 0.0001));
+
+	// 在相同累计时间比较真实 Socket，覆盖 30/60/120 FPS，不复制动画进度公式作为预期结果。
+	TArray<FTransform> Samples;
+	TArray<FTransform> CaptureSamples;
+	for (int32 FPS : {30, 60, 120})
+	{
+		FMiniatureInspectionFixture TimedScene;
+		TimedScene.Controller->SetMiniatureInteractionMode(true);
+		TimedScene.Advance(0.1f, FPS);
+		Samples.Add(FTransform(TimedScene.POV().Rotation, TimedScene.POV().Location));
+		CaptureSamples.Add(TimedScene.Capture->GetActorTransform());
+	}
+	for (int32 Index = 1; Index < Samples.Num(); ++Index)
+	{
+		TestTrue(TEXT("不同帧率的主镜头过渡保持同样进度"), Samples[0].Equals(Samples[Index], 0.01));
+		TestTrue(TEXT("不同帧率的捕获取景过渡保持同样进度"), CaptureSamples[0].Equals(CaptureSamples[Index], 0.01));
+	}
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureFocusFramingTest,
 	"DreamSpace.Camera.Miniature.FramingCollisionAndGravity",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -223,7 +341,7 @@ bool FDreamMiniatureFocusFramingTest::RunTest(const FString& Parameters)
 			Scene.Controller->GetLocalPlayer()->AspectRatioAxisConstraint = Axis;
 			TestTrue(TEXT("真实手办组件可进入观察"), Scene.Miniature->BeginInspection());
 			TestTrue(TEXT("相机可聚焦到本角色的显示面"), Scene.Camera->BeginMiniatureFocus(Scene.Miniature, Scene.POV()));
-			Scene.Step();
+			Scene.Settle();
 			FMinimalViewInfo View = Scene.POV();
 			const FIntRect Rect(0, 0, 1920, FMath::RoundToInt(1920.0f / Aspect));
 			FSceneViewProjectionData Projection;
@@ -242,14 +360,15 @@ bool FDreamMiniatureFocusFramingTest::RunTest(const FString& Parameters)
 				TestTrue(TEXT("四角保留配置的屏幕边距"), FMath::Abs(Clip.X / Clip.W) <= Scene.Camera->MiniatureScreenFill + 0.001
 					&& FMath::Abs(Clip.Y / Clip.W) <= Scene.Camera->MiniatureScreenFill + 0.001);
 			}
-			Scene.Camera->EndMiniatureFocus();
-			Scene.Miniature->EndInspection();
+			Scene.Camera->EndMiniatureFocus(false);
+			Scene.Miniature->EndInspection(false);
 		}
 	}
 
 	Scene.Character->FollowCamera->AspectRatio = 16.0f / 9.0f;
 	Scene.Miniature->BeginInspection();
 	Scene.Camera->BeginMiniatureFocus(Scene.Miniature, Scene.POV());
+	Scene.Settle();
 	const FVector Center = Scene.Miniature->GetDisplayCenter();
 	const FMinimalViewInfo Before = Scene.POV();
 	UBoxComponent* Wall = Scene.Box(Center + (Before.Location - Center) * 0.65f, FVector(5), ECC_Camera);
@@ -280,6 +399,7 @@ bool FDreamMiniatureInspectionRotationTest::RunTest(const FString& Parameters)
 {
 	FMiniatureInspectionFixture Scene;
 	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Settle();
 	const FTransform MainCamera(Scene.POV().Rotation, Scene.POV().Location);
 	const FTransform CharacterTransform = Scene.Character->GetActorTransform();
 	const FVector Gravity = Scene.Character->GetCharacterMovement()->GetGravityDirection();
@@ -288,12 +408,16 @@ bool FDreamMiniatureInspectionRotationTest::RunTest(const FString& Parameters)
 	Scene.Miniature->RotateInspection(FVector2D(120, 90));
 	const FQuat SingleFrameTurn = Scene.Capture->GetActorQuat();
 	Scene.Controller->SetMiniatureInteractionMode(false);
+	Scene.Settle();
 	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Settle();
 	for (int32 Frame = 0; Frame < 12; ++Frame)
 		Scene.Miniature->RotateInspection(FVector2D(10, 7.5));
 	TestTrue(TEXT("同一斜拖拆成多帧仍得到同一展示角度"), Scene.Capture->GetActorQuat().Equals(SingleFrameTurn, 0.0001));
 	Scene.Controller->SetMiniatureInteractionMode(false);
+	Scene.Settle();
 	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Settle();
 	const float CaptureDistance = FVector::Distance(Scene.Capture->GetActorLocation(), Scene.Anchor->GetActorLocation());
 	const float FOV = Scene.Capture->GetCaptureComponent2D()->FOVAngle;
 	const FVector Ray = Scene.Miniature->GetDisplayCenter() - MainCamera.GetLocation();
@@ -366,6 +490,7 @@ bool FDreamMiniatureInspectionRotationTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("命中的真实机关确实执行了旋转"), Target->GetActorTransform().Equals(TargetTransform, 0.001));
 	Scene.Miniature->DisplayFacingMode = EDreamMiniatureFacingMode::Fixed;
 	Scene.Controller->SetMiniatureInteractionMode(false);
+	Scene.Settle();
 	TestTrue(TEXT("退出后恢复固定面向的配置旋转"), Scene.Display->GetRelativeRotation().Quaternion().Equals(
 		Scene.Miniature->DisplayRelativeTransform.GetRotation(), 0.0001));
 	const FTransform AfterExit = Scene.Capture->GetActorTransform();
@@ -424,11 +549,17 @@ bool FDreamMiniatureGameplayRenderTest::RunTest(const FString& Parameters)
 			AddError(TEXT("主视口渲染检查丢失角色或等待截图超时"));
 			return true;
 		}
-		if (Now - State->Since < 2.0)
+		// 进入/退出后的下一阶段在动画中途抓图，其它阶段等待两秒让目标姿态与 GPU 画面稳定。
+		const double Delay = (State->Stage == 2 || State->Stage == 7) ? 0.12 : 2.0;
+		if (Now - State->Since < Delay)
 			return false;
-		// 奇数阶段等待渲染线程真正保存新截图，不能用先前运行遗留的同名文件判定成功。
-		if (State->Stage % 2 == 1 && IFileManager::Get().GetTimeStamp(*State->LastScreenshot) < State->StartedUTC)
-			return false;
+		// 每次请求后等待渲染线程真正保存新截图，不能用先前运行遗留的同名文件判定成功。
+		if (!State->LastScreenshot.IsEmpty())
+		{
+			if (IFileManager::Get().GetTimeStamp(*State->LastScreenshot) < State->StartedUTC)
+				return false;
+			State->LastScreenshot.Reset();
+		}
 		auto Screenshot = [&](const TCHAR* Name)
 		{
 			State->LastScreenshot = Directory / Name;
@@ -444,23 +575,29 @@ bool FDreamMiniatureGameplayRenderTest::RunTest(const FString& Parameters)
 			TestTrue(TEXT("实际游戏主视口进入 Tab 居中观察"), CurrentController->IsMiniatureInteractionMode());
 			break;
 		case 2:
-			Screenshot(TEXT("Centered.png"));
+			Screenshot(TEXT("EnterTransition.png"));
 			break;
 		case 3:
+			Screenshot(TEXT("Centered.png"));
+			break;
+		case 4:
 			// 捕获像素核对使用已由逻辑回归覆盖的展示旋转入口，无需依赖无窗口进程的鼠标焦点。
 			CurrentCharacter->SceneMiniature->RotateInspection(FVector2D(200, 140));
 			break;
-		case 4:
+		case 5:
 			Screenshot(TEXT("Rotated.png"));
 			break;
-		case 5:
+		case 6:
 			CurrentController->SetMiniatureInteractionMode(false);
 			TestFalse(TEXT("实际游戏退出后解除移动与视角锁"), CurrentController->IsMoveInputIgnored() || CurrentController->IsLookInputIgnored());
 			break;
-		case 6:
+		case 7:
+			Screenshot(TEXT("ExitTransition.png"));
+			break;
+		case 8:
 			Screenshot(TEXT("Restored.png"));
 			break;
-		case 7:
+		case 9:
 			AddInfo(FString::Printf(TEXT("主视口截图已保存：%s"), *Directory));
 			return true;
 		}

@@ -42,13 +42,19 @@ public:
 
 	/**
 	 * Tab 观察时将同一台 FollowCamera 对准显示面中心，不改写探索用的臂长、肩位或控制旋转。
-	 * 进入时保留相机看向手办的方向，并保存为角色局部姿态，平台翻转重力时随角色一起搬运。
+	 * 保留进入时的水平观察方向，按当前重力建立轻微俯视，再保存为角色局部姿态供平台搬运。
+	 * 进入与退出都从当前 Socket 开始平滑过渡，连续切换不会跳回上一次动画的起点。
 	 * 相机位置仍通过本组件的 Camera 通道扫掠和 Socket 发布，人物局部剔除也使用最终镜头。
 	 */
 	bool BeginMiniatureFocus(UDreamSceneCapturePresentationComponent* Miniature, const FMinimalViewInfo& PlayerPOV);
-	/** 解除聚焦并重建探索相机历史，防止用手办观察距离作为越肩相机的碰撞恢复起点。 */
-	void EndMiniatureFocus();
+	/** 正常退出平滑返回探索；失去角色/切镜头等清理传 false，立即终止过渡并重建探索 Socket。 */
+	void EndMiniatureFocus(bool bBlend = true);
 	bool IsMiniatureFocused() const { return MiniatureFocusTarget.IsValid(); }
+	/** 主镜头与 SceneCapture 共用同一重力相对俯视约定，避免只改变面片倾角却仍显示建筑的平视图。 */
+	FQuat MakeMiniatureInspectionRotation(const FVector& ViewDirection) const;
+	/** 捕获相机复用已经缓入缓出的进度，使显示内容与主镜头在同一帧抵达目标。 */
+	bool IsMiniatureCameraBlending() const { return bMiniatureCameraBlending; }
+	float GetMiniatureCameraBlendAlpha() const { return MiniatureCameraBlendAlpha; }
 
 	/**
 	 * 手办在视口较紧的一边占据的比例。默认 0.65，四周留出空间供左键把物品拖出显示面。
@@ -56,6 +62,20 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|手办观察", meta = (ClampMin = "0.1", ClampMax = "0.9"))
 	float MiniatureScreenFill = 0.65f;
+
+	/**
+	 * 相对当前重力地面的向下观察角，单位为度。默认 15 度，既能看见模型顶部又保留侧面。
+	 * 使用视线的水平投影保留进入方向，不累加探索相机的 Pitch；重力翻转后仍是角色脚下的俯视。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|手办观察", meta = (ClampMin = "0.0", ClampMax = "60.0", Units = "deg"))
+	float MiniatureLookDownAngle = 15.0f;
+
+	/**
+	 * Tab 进入/退出的过渡时长，单位为秒。默认 0.35 秒，位置插值与四元数旋转共用 Smoothstep 进度。
+	 * 0 表示即时切换；每次切换重新读取当前姿态，动画期间的角色搬运、目标移动与相机碰撞仍会更新。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "相机|手办观察", meta = (ClampMin = "0.0", UIMax = "1.0", Units = "s"))
+	float MiniatureTransitionDuration = 0.35f;
 
 	/** 当前肩位比例，1 表示完整右肩，0 表示回到中轴；供调试与运行时观察使用。 */
 	float GetShoulderWeight() const { return ShoulderWeight; }
@@ -165,6 +185,19 @@ private:
 	FQuat MiniatureFocusLocalRotation = FQuat::Identity;
 	/** 独立处理聚焦构图，但复用现有相机扫掠、Socket 和材质更新入口。 */
 	bool UpdateMiniatureFocus(bool bDoTrace, float DeltaTime);
+	/** 切换起点存为角色局部姿态，随移动平台/重力翻转一起搬运，不在旧世界位置拖出相机尾迹。 */
+	void BeginMiniatureCameraBlend();
+	/** 两种构图统一在这里过渡、校验中间位置的碰撞并发布 Socket，剔除材质读取同一最终镜头。 */
+	void PublishCameraPose(const FVector& Pivot, const FVector& Location, const FQuat& Rotation,
+		bool bDoTrace, float DeltaTime);
+	FTransform MiniatureBlendStartLocal = FTransform::Identity;
+	FVector MiniatureBlendStartPivotLocal = FVector::ZeroVector;
+	FVector PublishedCameraPivot = FVector::ZeroVector;
+	bool bHasPublishedCameraPose = false;
+	bool bMiniatureCameraBlending = false;
+	float MiniatureCameraBlendElapsed = 0.0f;
+	float MiniatureCameraBlendDuration = 0.0f;
+	float MiniatureCameraBlendAlpha = 1.0f;
 	/** 一次真实球扫掠的结果，同时保留命中信息，供预警规则与调试显示复用。 */
 	struct FCameraSweep
 	{

@@ -242,6 +242,8 @@ bool FDreamMiniatureExtractionControllerTest::RunTest(const FString& Parameters)
 	Controller->Possess(Character);
 	Controller->SetViewTarget(Character);
 	UDreamShoulderCameraComponent* ShoulderCamera = CastChecked<UDreamShoulderCameraComponent>(Character->CameraBoom);
+	// 本测试手动注入固定投影，只验证取出生命周期；镜头过渡由专门的主视口相机测试覆盖。
+	ShoulderCamera->MiniatureTransitionDuration = 0.0f;
 	ShoulderCamera->Activate(true);
 	ShoulderCamera->TickComponent(0.0f, LEVELTICK_All, nullptr);
 	// Tab 现在会真正改变主相机与显示姿态。固定测试投影必须在进入模式后注入，

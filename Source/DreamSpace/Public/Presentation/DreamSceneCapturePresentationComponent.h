@@ -299,8 +299,8 @@ public:
 	 * 只有显示资源已经启用时才返回 true，防止 Tab 聚焦一个不存在或被隐藏的手办。
 	 */
 	bool BeginInspection();
-	/** 结束观察并恢复跟随探索相机的取景方式；再次进入时从当时的展示角度重新开始。 */
-	void EndInspection();
+	/** 结束观察，按主相机的过渡进度恢复探索取景；生命周期清理传 false 直接恢复。 */
+	void EndInspection(bool bBlend = true);
 	/** 接收屏幕像素增量，更新围绕场景锚点的捕获姿态；停止输入后保持最后的展示角度。 */
 	void RotateInspection(const FVector2D& PointerDelta);
 	/** 手办是否处于独立观察状态，供控制器和主相机统一处理生命周期。 */
@@ -426,6 +426,14 @@ private:
 	 * 捕获镜头绕真实场景锚点公转，面片仍朝向玩家主镜头，两者在观察模式下独立转向。
 	 */
 	bool bInspectionActive = false;
+	/** 进入时只过渡捕获角度，退出时连同景别一起恢复，进度由主镜头提供，避免两个动画不同步。 */
+	bool bInspectionCaptureBlending = false;
+	bool bCaptureViewReturning = false;
+	FQuat InspectionBlendStartRotation = FQuat::Identity;
+	FTransform CaptureReturnStart = FTransform::Identity;
+	float CaptureReturnStartDistance = 0.0f;
+	float CaptureReturnStartFOV = 60.0f;
+	float CaptureReturnStartOrthoWidth = 80.0f;
 	FQuat InspectionCaptureRotation = FQuat::Identity;
 	float InspectionCaptureDistance = 0.0f;
 	float InspectionCaptureFOV = 60.0f;
@@ -435,6 +443,8 @@ private:
 	void DestroyPresentationResources();
 	void SetPresentationActive(bool bActive);
 	void UpdateCaptureView();
+	/** 原有窗口/固定取景规则负责计算退出动画的动态目标，不使用观察时的近距离主镜头。 */
+	void UpdateExplorationCaptureView();
 	void UpdateDisplayFacing();
 	void UpdateCaptureBlacklist();
 	void CaptureOnce();
