@@ -12,11 +12,36 @@ namespace
 	 * Actor 可以用无碰撞的 SceneComponent 做根，再把一个或多个网格/碰撞盒挂在其下。
 	 * UE 的 SetActorLocation(..., true) 只扫根组件，因此这里必须逐个检查真正随根移动的碰撞体。
 	 */
-	bool IsMovingCollisionComponent(const AActor* Actor, const UPrimitiveComponent* Component)
+	void GetMovingCollisionComponents(const AActor* Actor, TArray<AActor*>& MovingActors,
+		TArray<UPrimitiveComponent*>& Components)
 	{
-		const USceneComponent* Root = Actor ? Actor->GetRootComponent() : nullptr;
-		return Root && Component && Component->IsRegistered() && Component->IsQueryCollisionEnabled()
-			&& (Component == Root || Component->IsAttachedTo(Root));
+		if (!Actor || !Actor->GetRootComponent())
+			return;
+		MovingActors.Add(const_cast<AActor*>(Actor));
+		Actor->GetAttachedActors(MovingActors, false, true);
+		for (AActor* MovingActor : MovingActors)
+		{
+			const USceneComponent* Root = MovingActor ? MovingActor->GetRootComponent() : nullptr;
+			if (!Root || !MovingActor->GetActorEnableCollision())
+				continue;
+			TArray<UPrimitiveComponent*> ActorComponents;
+			MovingActor->GetComponents(ActorComponents);
+			for (UPrimitiveComponent* Component : ActorComponents)
+			{
+				if (Component && Component->IsRegistered() && Component->IsQueryCollisionEnabled()
+					&& (Component == Root || Component->IsAttachedTo(Root)))
+					Components.Add(Component);
+			}
+		}
+	}
+
+	bool IsNonWorseningInitialOverlap(const FHitResult& Hit, const FVector& Delta, bool bRotationChanged)
+	{
+		// 凸体的接触法线可能有微小偏斜，允许约 0.057 度内的近似切向平移。
+		// 只有已有重叠可以离开或滑动；明显向内的运动和旋转仍保留阻挡。
+		constexpr double TangentNormalTolerance = 0.001;
+		return Hit.bStartPenetrating && !bRotationChanged && !Hit.ImpactNormal.IsNearlyZero()
+			&& FVector::DotProduct(Hit.ImpactNormal, Delta.GetSafeNormal()) >= -TangentNormalTolerance;
 	}
 }
 
@@ -30,17 +55,18 @@ float DreamInteractionCollision::FindSafeMoveFraction(
 	const FTransform CurrentActorTransform = Actor->GetActorTransform();
 	FComponentQueryParams QueryParams(SCENE_QUERY_STAT(DreamInteractionMove), Actor);
 	QueryParams.bIgnoreTouches = true;
+	TArray<AActor*> MovingActors;
+	TArray<UPrimitiveComponent*> Components;
+	GetMovingCollisionComponents(Actor, MovingActors, Components);
+	// 子 Actor 的门、贴纸等随父 Actor 同步移动，组内碰撞不能阻挡自己的运动。
+	// 它们的查询碰撞体仍参加下面的扫掠，继续阻挡外部墙体和机关。
+	QueryParams.AddIgnoredActors(MovingActors);
 	for (const AActor* IgnoredActor : IgnoredActors)
 		QueryParams.AddIgnoredActor(IgnoredActor);
 	float SafeFraction = 1.0f;
 
-	TArray<UPrimitiveComponent*> Components;
-	Actor->GetComponents(Components);
 	for (UPrimitiveComponent* Component : Components)
 	{
-		if (!IsMovingCollisionComponent(Actor, Component))
-			continue;
-
 		// 组件相对 Actor 的姿态包含其自身偏移，也支持根是 SceneComponent 的蓝图。
 		// 用当前世界姿态建立相对变换，再预测本小步结束时每个组件实际会到达哪里。
 		const FTransform RelativeToActor = Component->GetComponentTransform().GetRelativeTransform(CurrentActorTransform);
@@ -48,6 +74,8 @@ float DreamInteractionCollision::FindSafeMoveFraction(
 		const FVector Start = Component->GetComponentLocation();
 		const FVector End = TargetComponentTransform.GetLocation();
 		const float Distance = FVector::Distance(Start, End);
+		const bool bRotationChanged =
+			!TargetComponentTransform.GetRotation().Equals(Component->GetComponentQuat(), KINDA_SMALL_NUMBER);
 		bool bSweepFoundBlocker = false;
 
 		if (Distance > KINDA_SMALL_NUMBER)
@@ -60,6 +88,8 @@ float DreamInteractionCollision::FindSafeMoveFraction(
 			{
 				if (Hit.bBlockingHit && Hit.GetActor() != Actor)
 				{
+					if (IsNonWorseningInitialOverlap(Hit, End - Start, bRotationChanged))
+						continue;
 					bSweepFoundBlocker = true;
 					// 离接触面留半厘米，避免浮点误差把下一帧的起点放到障碍内部。
 					SafeFraction = FMath::Min(SafeFraction,
@@ -70,7 +100,7 @@ float DreamInteractionCollision::FindSafeMoveFraction(
 
 		// 纯平移已有完整扫掠，重复做终点重叠会把关卡中预先贴合的表面误判为阻挡。
 		// 只有组件朝向确实变化时，才需要补查 UE 扫掠不支持的旋转体积。
-		if (!TargetComponentTransform.GetRotation().Equals(Component->GetComponentQuat(), KINDA_SMALL_NUMBER))
+		if (bRotationChanged)
 		{
 			TArray<FOverlapResult> Overlaps;
 			World->ComponentOverlapMulti(Overlaps, Component, TargetComponentTransform.GetLocation(),
@@ -98,16 +128,14 @@ float DreamInteractionCollision::GetMaxCollisionRadius(const AActor* Actor, cons
 		return 0.0f;
 
 	float Radius = 0.0f;
+	TArray<AActor*> MovingActors;
 	TArray<UPrimitiveComponent*> Components;
-	Actor->GetComponents(Components);
+	GetMovingCollisionComponents(Actor, MovingActors, Components);
 	for (const UPrimitiveComponent* Component : Components)
 	{
-		if (IsMovingCollisionComponent(Actor, Component))
-		{
-			// 包围球可能比真实形状大，但能保证旋转子步不会因门板太长而跨过薄障碍。
-			Radius = FMath::Max(Radius,
-				FVector::Distance(PivotWorldLocation, Component->Bounds.Origin) + Component->Bounds.SphereRadius);
-		}
+		// 包围球可能比真实形状大，但能保证旋转子步不会因门板太长而跨过薄障碍。
+		Radius = FMath::Max(Radius,
+			FVector::Distance(PivotWorldLocation, Component->Bounds.Origin) + Component->Bounds.SphereRadius);
 	}
 	return Radius;
 }
