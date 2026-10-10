@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """真实 UE 渲染器的白盒版本截图与 PIE 验收脚本。
 
-脚本不会修改源 TEST 关卡，只加载独立的 WhiteBoxPreview，检查两个材质能否
+脚本不会修改源 TEST 关卡，只加载独立的 WhiteBoxPreview，检查专用材质能否
 重新编译，并确认点击“运行”时使用预览 GameMode、固定相机且没有 Pawn/HUD。
 """
 
@@ -32,7 +32,7 @@ camera = next((actor for actor in actors if isinstance(actor, unreal.CameraActor
 if not camera:
     raise RuntimeError("白盒预览关卡缺少固定相机")
 
-# 确认关卡只启用白盒渐变，不残留上一版描边或线条抗锯齿。
+# 确认关卡只启用灰度提亮，不残留上一版边缘渐变或铅笔描边。
 volumes = [actor for actor in actors if isinstance(actor, unreal.PostProcessVolume)]
 if len(volumes) != 1:
     raise RuntimeError("白盒关卡应只有一个后处理体积")
@@ -45,7 +45,7 @@ if active_blendables != [MATERIAL_ROOT + "MI_WhiteBoxPost.MI_WhiteBoxPost"]:
 
 compile_errors = {}
 node_counts = {}
-for name in ("M_WhiteBoxSurface", "M_WhiteBoxPost"):
+for name in ("M_WhiteBoxSurface", "M_WhiteBoxPost", "M_WhiteBoxBackground"):
     material = unreal.EditorAssetLibrary.load_asset(MATERIAL_ROOT + name)
     if not material:
         raise RuntimeError("白盒材质缺失：" + name)
@@ -57,10 +57,24 @@ for name in ("M_WhiteBoxSurface", "M_WhiteBoxPost"):
 
 white_box_instance = unreal.EditorAssetLibrary.load_asset(MATERIAL_ROOT + "MI_WhiteBoxPost")
 parameter_values = {}
-for name in ("EdgeWidth", "EdgeDarkness", "EdgeFalloff", "NormalThreshold",
-             "DepthThreshold", "FaceBase", "FaceContrast", "EdgeGray"):
+for name in ("ShadowFloor", "WhitePoint", "MidtoneLift"):
     parameter_values[name] = unreal.MaterialEditingLibrary.get_material_instance_scalar_parameter_value(
         white_box_instance, name)
+
+# 白色环境必须真实存在且不投影；后处理只读取颜色，不靠深度裁切补出白底。
+backgrounds = [actor for actor in actors if actor.actor_has_tag("DreamWhitePreviewBackground")]
+if len(backgrounds) != 1:
+    raise RuntimeError("白盒关卡应有且仅有一个白色环境")
+background_component = backgrounds[0].static_mesh_component
+if (background_component.get_editor_property("cast_shadow")
+        or background_component.get_material(0).get_path_name()
+        != MATERIAL_ROOT + "M_WhiteBoxBackground.M_WhiteBoxBackground"):
+    raise RuntimeError("白盒背景材质或投影设置不正确")
+settings = volumes[0].get_editor_property("settings")
+if (settings.get_editor_property("ambient_occlusion_intensity") != 0.0
+        or settings.get_editor_property("dynamic_global_illumination_method")
+        != unreal.DynamicGlobalIlluminationMethod.NONE):
+    raise RuntimeError("白盒关卡仍启用了环境遮蔽或间接光照")
 
 # UE 5.8 的 True 实际是移除一个“关闭实时”的覆盖项，直接调用可能触发 ensure。
 # 先添加再移除这个临时项，保持验收视口实时渲染，并避免启动阶段的无效警告。
@@ -104,6 +118,8 @@ def finish(error=None):
         "active_blendables": active_blendables,
         "material_node_counts": node_counts,
         "white_box_parameters": parameter_values,
+        "background_actor": backgrounds[0].get_actor_label(),
+        "mesh_count": sum(actor.actor_has_tag("DreamWhitePreviewMesh") for actor in actors),
         "play_preview": state["play_report"],
         "error": error,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -134,7 +150,7 @@ def tick(delta_seconds):
             if not CAPTURES[state["capture_index"]][2].exists():
                 finish("白盒截图任务完成但文件未写入")
                 return
-            # 第二种分辨率验证屏幕采样坐标和渐变宽度随视口缩放仍然正确。
+            # 第二种分辨率检查细结构在缩小后仍然清晰，且背景、块面不会出现彩色偏差。
             if state["capture_index"] + 1 < len(CAPTURES):
                 state["capture_index"] += 1
                 state["task"] = None
