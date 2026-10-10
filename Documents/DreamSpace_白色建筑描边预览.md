@@ -1,92 +1,96 @@
-# 白色建筑描边预览
+# 白色建筑手绘排线预览
 
-独立预览关卡使用 `TEST` 中当前可见的建筑形体，呈现纯白背景、白色表面、浅灰形体明暗和连续铅笔结构线。笔迹有轻微粗细、深浅与石墨颗粒变化，并在原轮廓附近平滑摆动。当前仅实现视觉效果，不包含标题、开始交互或旋转。
+独立展示关卡使用 `TEST` 中的 29 个可见建筑网格，呈现纯白背景、稳定黑色轮廓和按明暗变化的手绘排线。亮面留白，中间调使用单向笔划，阴影逐渐增加交叉线，最深暗部再增加一层笔划。风格依据用户提供的《Real-Time Rendering》截图右侧的表面排线效果。
+
+当前版本的手绘感来自阴影笔划的轻微弯曲、接笔和笔压差异。轮廓没有时间位移，不需要等待动画或调节摆动速度。
 
 ## 查看效果
 
-1. 在 UE 内容浏览器中打开 `Content/DreamPresentation/WhitePreview/Maps/L_WhiteOutlinePreview`。
-2. 点击“运行”。预览专用 GameMode 会使用固定相机，不生成角色或调试 HUD。
-3. 在编辑器中自由查看时使用“光照”模式，并确认后处理显示开启；按 `G` 可隐藏编辑器图标。查看固定构图可右键 `WhitePreview_Camera` 选择“驾驶”。
-4. 编辑器中需要开启视口“实时”才能看到笔迹摆动；运行游戏时会自动更新。`MI_WhitePencil` 的 `AnimationTime` 应保持 `-1`。
+1. 在 UE 内容浏览器打开 `Content/DreamPresentation/WhitePreview/Maps/L_WhiteOutlinePreview`。
+2. 点击“运行”，专用 GameMode 会使用固定相机，不生成角色或 HUD。
+3. 编辑器中自由查看时使用“光照”模式，并确认后处理显示开启；按 `G` 可隐藏图标。右键 `WhitePreview_Camera` 选择“驾驶”可查看固定构图。
 
-这个关卡是静态快照，复用源网格，只覆盖预览 Actor 的材质槽。`TEST`、原网格默认材质、解谜蓝图和项目默认启动地图均不改变。未来制作开始界面时，可在此展示关卡上继续添加文字、动画和开始交互。
+运行时会临时使用 FXAA，避免 TSR 的逐帧深度采样抖动影响细结构线；退出预览后恢复进入前的抗锯齿设置。此开关由后处理体积的 `DreamWhiteHatchingPreview` 标签控制，白盒方案没有此标签。编辑器自由查看时若细线闪动，可在控制台输入 `r.AntiAliasingMethod 1`；返回其他关卡后按项目设置恢复，例如 TSR 为 `r.AntiAliasingMethod 4`。
 
-## 资源与参数
+![UE 运行时的手绘排线预览](Images/WhiteHatchingPreview.png)
 
-资源都位于 `/Game/DreamPresentation/WhitePreview`：
+仅实现展示效果，不包含标题、点击开始或建筑旋转。关卡是静态快照，复用原网格并覆盖复制组件的材质槽。`TEST`、源网格默认材质、解谜蓝图、项目默认启动地图及另一套 `WhiteBoxPreview` 不受本次更新影响。
+
+## 资源与调节
+
+资源位于 `/Game/DreamPresentation/WhitePreview`。
 
 | 资源 | 用途 |
 | --- | --- |
 | `Materials/M_WhiteArchitecture` | 双面、非金属、高粗糙度白色表面，保留几何法线并支持 Nanite |
-| `Materials/M_WhiteOutlinePost` | 色调映射后的白背景、浅灰明暗及法线／深度边缘识别 |
-| `Materials/M_WhiteOutlineAA` | 在原平滑阶段加入连续亚像素位移、石墨密度与沿边缘方向抗锯齿 |
-| `Materials/MI_WhiteOutline` | 关卡实际使用的描边材质实例，可直接调节效果 |
-| `Materials/MI_WhitePencil` | 关卡实际使用的铅笔材质实例，可调摆动和石墨笔迹 |
-| `Maps/L_WhiteOutlinePreview` | 建筑静态快照、后处理、灯光与固定相机 |
+| `Materials/M_WhiteOutlinePost` | 纯白画布、深度／法线描边、明暗驱动的表面排线 |
+| `Materials/MI_WhiteOutline` | 关卡使用的实例，主要视觉参数在这里调节 |
+| `Materials/M_WhiteOutlineAA` | 描边与排线生成后的方向抗锯齿 |
+| `Materials/MI_WhitePencil` | 保留已有资源路径，目前仅提供 `SmoothingStrength`，默认 1 |
+| `Maps/L_WhiteOutlinePreview` | 建筑快照、灯光、后处理体积和固定相机 |
 
-打开 `MI_WhiteOutline`，勾选相应参数的覆盖开关再修改：
+打开 `MI_WhiteOutline`，勾选参数的覆盖开关再修改。优先调节排线间距、强度和阴影明暗。
 
-| 参数 | 默认值 | 调整效果 |
+| 排线参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `SilhouetteWidth` | 1.15 | 外轮廓采样半径，单位为最终输出像素 |
-| `StructureWidth` | 0.95 | 墙角、台阶及遮挡边缘的采样半径 |
-| `StructureStrength` | 0.9 | 内部线条浓度，0 关闭，1 为完整墨色 |
-| `NormalThreshold` | 0.25 | 越高，越只保留明显的法线转折 |
-| `DepthThreshold` | 0.006 | 越高，越过滤细小的遮挡边缘 |
-| `ShadingStrength` | 0.16 | 浅灰明暗强度，0 为严格纯白表面 |
-| `LineOpacity` | 1.0 | 所有线条的整体浓度 |
-| `InkColor` | 接近黑色 | 线条颜色 |
-| `LightDirection` | 世界空间方向 | 浅灰形体的明暗方向 |
-| `MaxSubjectDepth` | 1000000 cm | 超过此深度视为白背景 |
-| `StrokeVariation` | 0.22 | 连续的空间线宽变化；0 恢复等宽线 |
+| `HatchStrength` | 0.88 | 排线整体浓度；0 关闭排线 |
+| `HatchSpacing` | 48 cm | 世界表面的基础线间距；增大更疏、更容易看清单条笔划 |
+| `HatchWidth` | 0.85 px | 最终输出像素的笔划宽度；远处用导数过滤减少摩尔纹 |
+| `HatchAngle` | 12° | 主笔划相对投影面的角度；交叉层再偏转 60° |
+| `HatchIrregularity` | 0.12 | 固定的排间偏差与笔划弯曲幅度，以间距比例表示 |
+| `HatchStrokeLength` | 6 | 单段笔划长度，以基础间距倍数表示；各排错开接笔位置 |
+| `ShadowInfluence` | 0.6 | 实际白色场景亮度的权重，其余来自法线受光 |
+| `ShadowReference` | 0.72 | 受光白面的显示亮度参考；低于参考逐渐增加排线 |
+| `HatchToneBias` | 0.02 | 明暗留白偏移；增大可让更多表面保持白色 |
+| `HatchToneContrast` | 1.0 | 明暗对比；增大更早出现交叉排线 |
+| `HatchDebugView` | 0 | 0 完整效果，1 明暗依据，2 仅排线，3 原始白模光照；正常使用保持 0 |
 
-打开 `MI_WhitePencil` 调节手绘感：
-
-| 参数 | 默认值 | 调整效果 |
+| 描边参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `WobbleAmplitude` | 0.9 | 每轴最大位移，单位为输出像素；建议 0.5～1.2，0 关闭位移 |
-| `WobbleSpeed` | 0.65 | 主时间波形的每秒周期数；完整循环约 3.08 秒，0 停止动画 |
-| `StrokeScale` | 64 | 主空间波长，单位为输出像素；越大长轮廓越舒缓 |
-| `GraphiteSoftness` | 0.12 | 石墨整体减淡量，越大笔迹越偏浅灰 |
-| `PressureVariation` | 0.12 | 连续笔压产生的深浅变化 |
-| `GraphiteGrain` | 0.16 | 固定细颗粒的浓度变化，不向白纸添加噪点 |
-| `SmoothingStrength` | 1.0 | 沿笔迹方向的抗锯齿强度 |
-| `AnimationTime` | -1 | 使用实时动画；非负值冻结为指定秒数，供定帧比较 |
+| `SilhouetteWidth` | 1.15 px | 外轮廓采样半径 |
+| `StructureWidth` | 0.95 px | 墙角、台阶和遮挡边缘的采样半径 |
+| `StructureStrength` | 0.9 | 内部结构线的墨色浓度 |
+| `NormalThreshold` | 0.25 | 提高后只保留更明显的法线转折 |
+| `DepthThreshold` | 0.006 | 提高后过滤更浅的遮挡细节 |
+| `ShadingStrength` | 0.035 | 排线之间的辅助浅灰；0 为纯白纸面 |
+| `StrokeVariation` | 0.08 | 固定的线宽变化；0 恢复等宽，不随时间变化 |
+| `LineOpacity` | 1 | 所有轮廓与结构线的整体浓度 |
+| `InkColor` | 接近黑色 | 轮廓墨色 |
+| `LightDirection` | (-0.36869, -0.52654, 0.76604) | 表面指向主光的世界方向，须与实际方向光同步 |
+| `MaxSubjectDepth` | 1000000 cm | 超过此距离视为白背景 |
 
-优先调整 `WobbleAmplitude` 和 `WobbleSpeed`。如果希望线更硬、更黑，可降低 `GraphiteSoftness`、`PressureVariation` 和 `GraphiteGrain`。把这三项、`WobbleAmplitude` 以及 `MI_WhiteOutline` 的 `StrokeVariation` 都设为 0，可恢复原等宽黑线风格。
+预览方向光 `WhitePreview_KeyLight` 使用 `Pitch=-50, Yaw=55, Roll=0`，强度为 3，光源角度为 5°。如果手动转动方向光，应同时更新 `LightDirection`；它是方向光朝向向量的反方向。
 
-时间波形连续，不逐帧随机生成线条；空间位移平滑，石墨浓度有下限，所以不会刻意生成虚线或闪烁缺口。白色背景保持纯白。后处理采样位移也会影响轮廓附近的浅灰像素，但不会移动网格、相机或原始几何缓冲。效果只增加现有平滑阶段的计算，不新增渲染通道。
+需要更轻的画面时，先增加 `HatchToneBias` 或降低 `HatchStrength`。希望阴影更像细长笔划时，增大 `HatchSpacing`，避免仅增加浓度。将 `HatchStrength`、`ShadingStrength` 和 `StrokeVariation` 设为 0，可以查看白底等宽描边。
 
-描边识别可见表面的几何转折和深度跳变，不绘制隐藏边，也不显示三角网格。内部深度判定使用倒数深度二阶差分，减少倾斜墙面被误判为黑块的问题。当前后处理用于专用白色展示关卡，关卡中的所有可见网格都会被纳入处理；不需要开启全项目 Custom Depth／Stencil。
+## 实现方式与范围
 
-## 重新生成
+`WhiteOutline.hlsl` 通过可见表面的绝对世界位置，在三个平面投影程序化排线，并根据法线混合。笔划不依赖模型 UV，也不读取或复制参考图的纹理。墙面和顶面的方向随面转折，相机改变时排线仍锚定于表面世界位置。将来如果让整个建筑旋转，应改为随展示主体运动的局部坐标。
 
-通常只需打开已生成的关卡。仅在 `TEST` 建筑布局改变、或修改着色代码后才需要重跑脚本。完整重跑会覆盖专用预览地图与材质，并恢复脚本里的默认参数；请先保存需要保留的预览调整。
+明暗由几何法线受光和已经渲染的统一白色表面亮度共同决定。投影、凹处和接触暗部通过场景亮度影响排线密度；这不是直接读取独立阴影缓冲，密度也不是物理光照值。固定曝光用于保持菜单画面的明暗关系。
 
-先编译 `DreamSpaceEditor`，随后在 PowerShell 运行：
+各层复用固定坐标，随明暗连续淡入。笔压变化、错开的接笔和轻微弯曲均为空间变化，没有 Time 节点。线间距投影到屏幕后过小时，过滤为平均覆盖率，减少密线的摩尔纹。
+
+外轮廓和内部结构线仍由深度、几何法线识别，不绘制隐藏边或三角网格。倒数深度的二阶差分可减少倾斜墙面被误当作结构线的情况。专用关卡中的全部可见网格都参与效果，不要求全项目开启 Custom Depth／Stencil。
+
+## 更新资源
+
+已生成的关卡可直接使用。修改 HLSL 后，在项目根目录运行增量更新：
 
 ```powershell
 & 'E:\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' `
   'F:\Ue5 Project\DreamSpace-UI\DreamSpace.uproject' `
   -run=pythonscript `
-  '-script=F:/Ue5 Project/DreamSpace-UI/Source/WhitePreview/generate_white_preview.py' `
+  '-script=F:/Ue5 Project/DreamSpace-UI/Source/WhitePreview/generate_white_preview.py --materials-only' `
   '-EnablePlugins=PythonScriptPlugin,EditorScriptingUtilities' `
-  -unattended -AllowCommandletRendering -nosound -stdout
+  -unattended -AllowCommandletRendering -nosound
 ```
 
-Python 插件只在此命令行运行时启用，不必改 `.uproject`。脚本路径使用正斜杠，避免路径里的 `\U` 被 Python 解释成转义。生成报告位于 `Saved/WhitePreview/generation_report.json`，列出源组件、取景范围和跳过的空引用。
+增量更新重建描边、排线和平滑材质，恢复实例默认参数，同步预览主光方向及后处理引用；保留网格、相机、白色表面和其他关卡设置。报告为 `Saved/WhitePreview/hatching_generation_report.json`。请在重跑前保留需要保留的手动调参。
 
-如果仅修改线条着色器，可将上面命令中的脚本参数改为：
+需要重新读取 `TEST` 的建筑布局时，移除 `--materials-only`。完整生成会覆盖专用预览地图和材质，须先编译 `DreamSpaceEditor`。Python 插件只在命令行中启用，无需修改 `.uproject`。脚本路径使用正斜杠，避免 `\U` 被解释为 Python 转义。
 
-```powershell
-'-script=F:/Ue5 Project/DreamSpace-UI/Source/WhitePreview/generate_white_preview.py --materials-only'
-```
-
-增量更新只重建描边与铅笔材质、恢复对应实例参数，并更新已有预览体积的材质引用。已有网格变换、相机、灯光及白色表面材质保留，不重新读取 `TEST`。报告写入 `Saved/WhitePreview/pencil_generation_report.json`。另一套 `WhiteBoxPreview` 资源不受影响。
-
-## 自动截图与视觉验收
-
-`Source/WhitePreview/capture_white_preview.py` 使用真实 UE 编辑器视口输出 1920×1080 和 1280×720 截图，并采集 960×540 的 24 帧完整循环。通过临时动态材质实例冻结时间，不保存定帧参数。截图后恢复关卡实际使用的材质实例并启动 PIE，检查预览 GameMode、相机标签、角色和 HUD，再采集两张运行截图验证 Time 节点确实驱动了运动。最后结束 PIE 并自动退出本次验收编辑器实例。
+## 渲染验收
 
 ```powershell
 & 'E:\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' `
@@ -96,24 +100,24 @@ Python 插件只在此命令行运行时启用，不必改 `.uproject`。脚本�
   -unattended -nosound -NoSplash
 ```
 
-截图与报告分别写入 `Saved/WhitePreview/WhiteOutlinePreview.png` 和 `Saved/WhitePreview/capture_report.json`。不能使用 `-nullrhi`，它不会渲染真正的画面。
+脚本使用真实渲染器，输出 1920×1080 和 1280×720 的完整画面、重复帧、关闭排线、明暗依据、仅法线明暗、仅排线和原始光照。随后明确恢复已保存实例及原抗锯齿设置，再运行 PIE，核对 GameMode、相机、后处理资源、调试参数及空 Pawn/HUD。PIE 在同一运行环境内采集完整、重复、关闭排线和仅排线对照，确认运行时抗锯齿切换到 FXAA，并检查结束 PIE 后恢复原值。截图期间的覆盖值仅写入临时动态实例，不保存关卡。完成后自动结束此次验收编辑器。不能加 `-nullrhi`。
 
-随后在安装 Pillow 和 NumPy 的普通 Python 环境中运行：
+截图和报告位于 `Saved/WhitePreview`：`WhiteHatchingPreview.png`、`WhiteHatchingPreview_PIE.png`、`hatching_capture_report.json`。在安装 Pillow 和 NumPy 的普通 Python 环境中运行：
 
 ```powershell
-python Source/WhitePreview/verify_pencil_preview.py
+python Source/WhitePreview/verify_hatching_preview.py
 ```
 
-脚本检查定帧和实时的像素变化、循环首尾近似一致、运动集中在笔迹附近、各分辨率非空且背景边缘纯白。输出 `Saved/WhitePreview/pencil_pixel_report.json`、`WhitePencilPreview.gif` 和顶部放大的 `WhitePencilDetail.gif`。GIF 使用同一灰度调色板且不抖色，展示原始渲染帧；时间间隔按 GIF 的 10 毫秒精度取整。
+检查包括排线对画面的实际贡献、实际光照对明暗的贡献、暗部笔划浓度高于亮部、重复帧稳定、完整 PIE 效果、截图尺寸及白背景。结果为 `hatching_pixel_report.json`，并裁出未经额外处理的 `WhiteHatchingDetail.png`。原始光照调试图允许引擎 GI 色偏；正式效果严格黑白灰。
 
-视觉验收主要看白色表面是否足够轻、内部线条是否过密、远处小结构是否易读，以及不同窗口尺寸下的描边粗细。屏幕描边会受到分辨率与渲染比例影响，最终可按目标 UI 的显示大小调节参数。
+UE 材质图编译返回成功不代表异步 GPU Shader 一定成功，应同时检查验收日志和像素结果。源网格引用的旧材质 `_Color_M09_1` 有缺贴图警告；预览实际使用新的白色表面材质。
 
-源 `TEST` 中存在空的装饰网格、旧门窗／洗衣机子蓝图加载警告以及一份缺贴图的旧材质。生成脚本跳过空组件，预览表面统一使用新白色材质；报告保留跳过记录，不补造缺失装饰。
+最终主观验收请关注：排线是否像铅笔阴影、亮面是否有足够留白，以及栏杆和窗框在目标 UI 显示尺寸下是否清楚。
 
-## 本次验证
+## 当前验证结果
 
-2026-10-09，UE 5.8.2：`DreamSpaceEditor Win64 Development` 和 `DreamSpace Win64 Development` 编译通过。独立重新加载后的三个新材质均无编译错误，1920×1080 真实视口截图完成；PIE 实际确认预览 GameMode 和相机标签正确，角色、HUD 均为空。预览包含 29 个静态网格。原 `TEST.umap` 的 Git 文件哈希与修改前一致，原资源没有保存改动。
+2026-10-10，UE 5.8.2：`DreamSpaceEditor Win64 Development` 与 `DreamSpace Win64 Development` 编译通过。重新加载并编译实际使用的三个材质，无本次材质的 GPU 编译错误，Time 节点数均为 0。1080p 与 720p 真实截图、灰度及白色画布检查通过。
 
-2026-10-10，铅笔风格更新：在 UE 5.8.2 中独立重新加载并编译三个材质，均无编译错误。真实渲染输出 1920×1080、1280×720、960×540，像素检查通过。指定时间点的显著变化全部位于笔迹附近；完整循环首尾平均差约 0.05 / 255，仅 0.00034% 的像素差超过 8 灰阶。PIE 中两张相隔约 0.64 秒的实时截图确认 Time 节点产生可见线条运动，预览 GameMode、相机及空 Pawn/HUD 检查通过。
+关闭排线后，1080p 有 69,890 个像素发生超过 8 灰阶的变化；改为仅法线明暗后，147,395 个像素的明暗依据发生变化，确认实际光照参与了排线。四档明暗中的平均笔划暗度依次约为 3.7、20.7、40.3、46.7，暗处比亮处更密。
 
-本次仅增量更新线条材质和预览后处理引用，无 C++ 改动。`TEST.umap`、白色表面材质和 `WhiteBoxPreview` 资源的 Git 文件哈希与更新前一致。新增代码和材质节点均有中文说明。动画的轻重与节奏仍需在实际 UE 运行画面中做主观验收；动图用于辅助比较。
+正式编辑器重复帧平均差为 0.162 / 255，PIE 重复帧为 0.112 / 255。PIE 对照确认完整轮廓与面内排线都可见，后处理使用保存的实例，预览规则、相机和空 Pawn/HUD 正确。运行时抗锯齿实测为 `4 → 1 → 4`，结束 PIE 后恢复原设置。`TEST.umap` 与 `WhiteBoxPreview` 地图的 Git 文件哈希与更新前一致，白色表面材质未变。

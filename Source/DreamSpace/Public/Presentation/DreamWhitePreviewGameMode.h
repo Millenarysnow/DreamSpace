@@ -20,6 +20,17 @@ public:
 	ADreamWhitePreviewGameMode();
 
 protected:
+	/** 仅带线稿标签的预览临时使用无时间抖动的抗锯齿，避免后处理细线逐帧变化。 */
+	virtual void BeginPlay() override;
+
+	/** 离开预览或结束 PIE 时恢复进入前的抗锯齿设置，避免影响其他关卡。 */
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 	/** 玩家进入时直接选择预览相机，避免父类尝试生成默认角色并改变取景。 */
 	virtual void HandleStartingNewPlayer_Implementation(APlayerController* NewPlayer) override;
+
+private:
+	/** r.AntiAliasingMethod 是进程共享变量；只在本规则确实修改后才负责恢复。 */
+	int32 PreviousAntiAliasingMethod = 0;
+	bool bRestoreAntiAliasingMethod = false;
 };
