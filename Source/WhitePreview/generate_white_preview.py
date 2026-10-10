@@ -8,6 +8,7 @@
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import unreal
@@ -30,6 +31,20 @@ OUTLINE_PARAMETERS = {
     "ShadingStrength": (0.16, "白色表面的浅灰明暗强度；0 为完全纯白。"),
     "LineOpacity": (1.0, "所有线条的整体浓度；0 为关闭描边。"),
     "MaxSubjectDepth": (1000000.0, "主体最大深度（厘米）；空背景始终输出纯白。"),
+    "StrokeVariation": (0.22, "连续笔压造成的线宽变化；0 恢复等宽描边，最大有效值 0.45。"),
+}
+
+# 铅笔材质继续使用原来的末端平滑阶段，不额外增加后处理通道。
+# 位移、浓度与颗粒分开调节；定帧参数默认关闭，运行时直接读取引擎时间。
+PENCIL_PARAMETERS = {
+    "SmoothingStrength": (1.0, "沿笔迹方向的抗锯齿强度；0 关闭，1 完整平滑。"),
+    "WobbleAmplitude": (0.9, "每轴摆动幅度（最终输出像素）；建议 0.5～1.2，0 关闭位移。"),
+    "WobbleSpeed": (0.65, "主波形每秒周期数；完整动画周期为 2 / 此值，0 停止动画。"),
+    "StrokeScale": (64.0, "空间摆动的主波长（输出像素）；越大，长线越舒缓。"),
+    "GraphiteSoftness": (0.12, "石墨整体减淡量；0 保留原黑色，默认呈现深灰笔迹。"),
+    "PressureVariation": (0.12, "沿笔迹的轻重变化；不会把线条擦断。"),
+    "GraphiteGrain": (0.16, "固定石墨颗粒的密度变化；0 关闭颗粒，白色留白不加噪点。"),
+    "AnimationTime": (-1.0, "定帧验收时间（秒）；-1 使用实时动画，非负值冻结在指定时间。"),
 }
 
 
@@ -138,7 +153,7 @@ def create_outline_material():
         node = expression(material, unreal.MaterialExpressionScalarParameter, -1300, index * 150, description)
         node.set_editor_property("parameter_name", name)
         node.set_editor_property("default_value", value)
-        node.set_editor_property("group", "描边与白色明暗")
+        node.set_editor_property("group", "铅笔线宽" if name == "StrokeVariation" else "描边与白色明暗")
         sources[name] = node
 
     for index, (name, value, description) in enumerate([
@@ -179,34 +194,51 @@ def create_outline_material():
 
 
 def create_smoothing_material():
-    """只对最终黑线进行边缘方向平滑，避免色调映射后的新线条产生阶梯锯齿。"""
+    """将完成的描边变成微动铅笔线，并沿边缘平滑；返回关卡实际使用的可调实例。"""
     material = asset_of_type("M_WhiteOutlineAA", MATERIAL_ROOT, unreal.Material, unreal.MaterialFactoryNew())
     clear_material_graph(material)
     material.set_editor_property("material_domain", unreal.MaterialDomain.MD_POST_PROCESS)
     material.set_editor_property("blendable_location", unreal.BlendableLocation.BL_SCENE_COLOR_AFTER_TONEMAPPING)
     # 同一后处理阶段按优先级从小到大执行；必须先描边、再读取描边后的颜色。
     material.set_editor_property("blendable_priority", 10)
-    custom = expression(material, unreal.MaterialExpressionCustom, 0, 0, "沿局部墨线方向平滑，保持白色留白")
-    custom.set_editor_property("description", "白色建筑线条抗锯齿")
+    custom = expression(material, unreal.MaterialExpressionCustom, 0, 0,
+                        "连续亚像素摆动、笔压与石墨颗粒，最后沿笔迹方向抗锯齿")
+    custom.set_editor_property("description", "白色建筑铅笔线条")
     custom.set_editor_property("code", (SCRIPT_DIR / "WhiteOutlineAA.hlsl").read_text(encoding="utf-8"))
     custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
+    scene = expression(material, unreal.MaterialExpressionSceneTexture, -500, 0, "上一个后处理的颜色，包含已生成的描边")
+    scene.set_editor_property("scene_texture_id", unreal.SceneTextureId.PPI_POST_PROCESS_INPUT0)
+    clock = expression(material, unreal.MaterialExpressionTime, -500, 180,
+                       "运行时秒数；暂停时仍更新，使未来菜单中的笔迹保持活动")
+    clock.set_editor_property("ignore_pause", True)
+    sources = {"SceneColor": scene, "TimeSeconds": clock}
+    for index, (name, (value, description)) in enumerate(PENCIL_PARAMETERS.items()):
+        node = expression(material, unreal.MaterialExpressionScalarParameter, -1100, index * 150, description)
+        node.set_editor_property("parameter_name", name)
+        node.set_editor_property("default_value", value)
+        node.set_editor_property("group", "定帧验收" if name == "AnimationTime" else "铅笔笔迹")
+        sources[name] = node
     inputs = []
-    for name in ("SceneColor", "SmoothingStrength"):
+    for name in sources:
         custom_input = unreal.CustomInput()
         custom_input.set_editor_property("input_name", name)
         inputs.append(custom_input)
     custom.set_editor_property("inputs", inputs)
-    scene = expression(material, unreal.MaterialExpressionSceneTexture, -500, 0, "上一个后处理的颜色，包含已生成的描边")
-    scene.set_editor_property("scene_texture_id", unreal.SceneTextureId.PPI_POST_PROCESS_INPUT0)
-    strength = expression(material, unreal.MaterialExpressionScalarParameter, -500, 180, "平滑强度；0 关闭，1 完整边缘抗锯齿")
-    strength.set_editor_property("parameter_name", "SmoothingStrength")
-    strength.set_editor_property("default_value", 1.0)
-    strength.set_editor_property("group", "线条平滑")
-    for node, name in ((scene, "SceneColor"), (strength, "SmoothingStrength")):
+    for name, node in sources.items():
         require(unreal.MaterialEditingLibrary.connect_material_expressions(node, "", custom, name), "连接平滑输入失败")
     connect_output(custom, unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     compile_and_save(material)
-    return material
+
+    instance = asset_of_type("MI_WhitePencil", MATERIAL_ROOT, unreal.MaterialInstanceConstant,
+                             unreal.MaterialInstanceConstantFactoryNew())
+    unreal.MaterialEditingLibrary.set_material_instance_parent(instance, material)
+    for name, (value, _) in PENCIL_PARAMETERS.items():
+        unreal.MaterialEditingLibrary.set_material_instance_scalar_parameter_value(instance, name, value)
+        actual = unreal.MaterialEditingLibrary.get_material_instance_scalar_parameter_value(instance, name)
+        require(math.isclose(actual, value, rel_tol=1e-5, abs_tol=1e-6), "铅笔参数读回不一致：" + name)
+    unreal.MaterialEditingLibrary.update_material_instance(instance)
+    require(unreal.EditorAssetLibrary.save_loaded_asset(instance, only_if_is_dirty=False), "保存铅笔实例失败")
+    return instance
 
 
 def snapshot_components():
@@ -374,7 +406,45 @@ def create_preview_level(records, white_material, outline_instance, smoothing_ma
             "camera_rotation": [camera_rotation.pitch, camera_rotation.yaw, camera_rotation.roll], "mesh_count": len(records)}
 
 
+def update_preview_materials():
+    """只更新线条材质及体积引用，保留已有预览的网格、相机、灯光与白色表面。"""
+    level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    require(level.load_level(PREVIEW_MAP), "无法加载现有预览关卡：" + PREVIEW_MAP)
+    actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors()
+    volumes = [actor for actor in actors if isinstance(actor, unreal.PostProcessVolume)
+               and actor.get_actor_label() == "WhitePreview_PostProcess"]
+    require(len(volumes) == 1, "预览应有且仅有一个专用后处理体积")
+    outline_instance = create_outline_material()
+    pencil_instance = create_smoothing_material()
+
+    # 将旧的平滑父材质替换为铅笔实例，并清理重跑时已有的同名实例引用。
+    # 仅筛除这两项，其余体积设置及可能存在的附加效果都保留。
+    post = volumes[0]
+    settings = post.get_editor_property("settings")
+    weighted = settings.get_editor_property("weighted_blendables")
+    replaced_paths = {MATERIAL_ROOT + "/M_WhiteOutlineAA.M_WhiteOutlineAA", pencil_instance.get_path_name()}
+    weighted.set_editor_property("array", [item for item in weighted.get_editor_property("array")
+                                if not item.get_editor_property("object")
+                                or item.get_editor_property("object").get_path_name() not in replaced_paths])
+    settings.set_editor_property("weighted_blendables", weighted)
+    post.set_editor_property("settings", settings)
+    post.add_or_update_blendable(outline_instance, 1.0)
+    post.add_or_update_blendable(pencil_instance, 1.0)
+    world = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world()
+    require(unreal.EditorLoadingAndSavingUtils.save_map(world, PREVIEW_MAP), "保存铅笔预览引用失败")
+    output = Path(unreal.Paths.project_saved_dir()) / "WhitePreview" / "pencil_generation_report.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps({"preview_map": PREVIEW_MAP, "materials_only": True,
+                                 "pencil_parameters": {name: value for name, (value, _) in PENCIL_PARAMETERS.items()}},
+                                ensure_ascii=False, indent=2), encoding="utf-8")
+    unreal.log("WHITE_PENCIL_OK map=%s report=%s" % (PREVIEW_MAP, output))
+
+
 def main():
+    # 修改着色器后采用增量更新；只有明确重建快照时才重新读取 TEST。
+    if "--materials-only" in sys.argv:
+        update_preview_materials()
+        return
     records, skipped = snapshot_components()
     white_material = create_white_material()
     outline_instance = create_outline_material()

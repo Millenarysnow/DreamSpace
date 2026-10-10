@@ -14,8 +14,15 @@ float2 viewportUV = GetViewportUV(Parameters);
 // 编辑器视口可能只占纹理的一部分，TSR 的场景深度也可能低于最终分辨率。
 // 不可把 PostProcessInput0 的纹理 UV 直接用于深度或法线，否则窗口缩放后会错位。
 float2 outputPixelUV = GetSceneTextureViewSize(PPI_PostProcessInput0).zw;
-float2 silhouetteStep = outputPixelUV * max(SilhouetteWidth, 0.5);
-float2 structureStep = outputPixelUV * max(StructureWidth, 0.5);
+// 手绘线不会沿整条边保持完全相同的宽度。使用连续、固定的空间波形模拟笔压，
+// 而不是逐像素随机改变宽度，避免细长栏杆出现断线；时间变化由后续铅笔材质负责。
+// StrokeVariation=0 恢复原来的等宽描边，最大变化限制在 45% 以内。
+float2 strokePixel = viewportUV / outputPixelUV;
+float widthPressure = sin(dot(strokePixel, float2(0.093, 0.048))) * 0.6
+    + sin(dot(strokePixel, float2(0.019, -0.077)) + 1.7) * 0.4;
+float widthScale = 1.0 + clamp(StrokeVariation, 0.0, 0.45) * widthPressure;
+float2 silhouetteStep = outputPixelUV * max(SilhouetteWidth * widthScale, 0.5);
+float2 structureStep = outputPixelUV * max(StructureWidth * widthScale, 0.5);
 float silhouetteEdge = 0.0;
 float normalEdge = 0.0;
 float depthEdge = 0.0;
