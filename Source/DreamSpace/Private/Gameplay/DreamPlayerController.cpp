@@ -4,6 +4,7 @@
 #include "DreamInteractableInterface.h"
 #include "DreamDragInteractionComponent.h"
 #include "DreamSpace.h"
+#include "DreamProximitySketchCameraManager.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputMappingContext.h"
@@ -25,6 +26,10 @@ static FAutoConsoleVariableRef CVarDreamMiniatureInteractionDebugDraw(
 
 ADreamPlayerController::ADreamPlayerController()
 {
+	// 游玩控制器独立安装距离线稿相机；效果每帧跟随被控制的 Pawn。
+	// 开始界面使用另一种控制器，因此不需要在地图中放全局后处理体积。
+	PlayerCameraManagerClass = ADreamProximitySketchCameraManager::StaticClass();
+
 	// 直接加载官方模板的两个映射上下文：IMC_Default 提供移动、跳跃和手柄视角，
 	// IMC_MouseLook 提供鼠标二维视角。映射资产不是蓝图，运行时由原生控制器管理。
 	static ConstructorHelpers::FObjectFinder<UInputMappingContext> DefaultContext(

@@ -61,7 +61,7 @@ UDreamSceneCapturePresentationComponent::UDreamSceneCapturePresentationComponent
 	DisplayMeshAsset = TSoftObjectPtr<UStaticMesh>(
 		FSoftObjectPath(TEXT("/Engine/BasicShapes/Plane.Plane")));
 	DisplayMaterialAsset = TSoftObjectPtr<UMaterialInterface>(
-		FSoftObjectPath(TEXT("/Game/DreamInteraction/Materials/M_SceneCaptureDisplay.M_SceneCaptureDisplay")));
+		FSoftObjectPath(TEXT("/Game/DreamPresentation/ProximitySketch/Materials/M_ProximityMiniatureDisplay.M_ProximityMiniatureDisplay")));
 }
 
 void UDreamSceneCapturePresentationComponent::BeginPlay()
@@ -205,6 +205,11 @@ void UDreamSceneCapturePresentationComponent::CreatePresentationResources()
 	DisplayMesh->SetCastShadow(false);
 	DisplayMesh->SetHiddenInGame(true);
 	DisplayMesh->SetHiddenInSceneCapture(true);
+	// 透明显示面不写普通场景深度。专用材质允许它按实际透明度写 CustomDepth，
+	// 并使用预留的 241 Stencil；距离线稿才能把手办像素判定为玩家旁边的物体，
+	// 而不是显示面后方的天空 / 远处墙面。SceneCapture 仍排除此显示面，防止递归。
+	DisplayMesh->SetRenderCustomDepth(true);
+	DisplayMesh->SetCustomDepthStencilValue(241);
 	DisplayMesh->SetRelativeTransform(DisplayRelativeTransform);
 
 	UStaticMesh* MeshAsset = DisplayMeshAsset.LoadSynchronous();
