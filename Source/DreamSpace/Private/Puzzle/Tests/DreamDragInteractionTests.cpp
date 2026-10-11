@@ -468,6 +468,8 @@ bool FDreamDragControllerLifecycleTest::RunTest(const FString& Parameters)
 	Scene.World->SpawnActor<ADreamSceneCaptureAnchor>();
 	Pawn->SceneMiniature->RenderTargetWidth = 256;
 	Pawn->SceneMiniature->RenderTargetHeight = 256;
+	// 持续交互回归验证的是解锁后的手办模式，显式领取以满足新的玩法前置条件。
+	Pawn->AcquireMiniature();
 	Pawn->SceneMiniature->BeginPlay();
 	Controller->SetIgnoreLookInput(true);
 	Controller->DispatchInteraction(Scene.Mover, nullptr, FVector(0, 0, 500), FVector::DownVector);
@@ -525,6 +527,7 @@ bool FDreamMiniatureDragMappingTest::RunTest(const FString& Parameters)
 		Scene.World->SpawnActor<ADreamCharacter>(FVector::ZeroVector, FRotator::ZeroRotator, Spawn);
 	Scene.World->SpawnActor<ADreamSceneCaptureAnchor>();
 	UDreamSceneCapturePresentationComponent* Miniature = Character->SceneMiniature;
+	Character->AcquireMiniature();
 	Miniature->BeginPlay();
 	UStaticMeshComponent* Display = nullptr;
 	TArray<UStaticMeshComponent*> Meshes;

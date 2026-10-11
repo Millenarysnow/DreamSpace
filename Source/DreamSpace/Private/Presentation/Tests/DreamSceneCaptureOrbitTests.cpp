@@ -198,6 +198,8 @@ bool FDreamMiniatureConfiguredProjectionTest::RunTest(const FString& Parameters)
 	// 否则会改变真实项目的手办清晰度和 RenderTarget 长宽比。
 	TestEqual(TEXT("Native character preserves miniature RT width"), Miniature->RenderTargetWidth, 2200);
 	TestEqual(TEXT("Native character preserves miniature RT height"), Miniature->RenderTargetHeight, 2500);
+	// 显示与拾取数学的回归使用已获得状态；开局隐藏及 Tab 门禁由密码箱套件验证。
+	Character->AcquireMiniature();
 	Miniature->BeginPlay();
 	UStaticMeshComponent* Display = nullptr;
 	TArray<UStaticMeshComponent*> Meshes;

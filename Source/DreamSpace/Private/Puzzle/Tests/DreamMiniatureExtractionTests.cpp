@@ -223,6 +223,8 @@ bool FDreamMiniatureExtractionControllerTest::RunTest(const FString& Parameters)
 		Scene.World->SpawnActor<ADreamCharacter>(FVector::ZeroVector, FRotator::ZeroRotator, Spawn);
 	Scene.World->SpawnActor<ADreamSceneCaptureAnchor>();
 	UDreamSceneCapturePresentationComponent* Miniature = Character->SceneMiniature;
+	// 先准备持有手办，再验证从显示面取出模型；密码箱流程在独立套件中覆盖。
+	Character->AcquireMiniature();
 	Miniature->BeginPlay();
 	UStaticMeshComponent* Display = nullptr;
 	TInlineComponentArray<UStaticMeshComponent*> CharacterMeshes(Character);
