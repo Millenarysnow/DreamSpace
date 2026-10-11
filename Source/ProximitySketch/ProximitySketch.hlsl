@@ -74,6 +74,74 @@ struct ProximityPencil
         }
         return float4(normalize(normal + float3(0.00001, 0, 0)), inverseDepth);
     }
+
+    // 输出像素可能比 GBuffer texel 小一倍甚至更多。细栏杆在低分辨率缓冲中
+    // 只占一列，先平均法线再做转折检测会抵消这列的法线；先检测真实 texel
+    // 的双侧转折，再插值墨线覆盖率，才能保留这种孤立的细几何。
+    float ThinGeometry(float2 viewportUV, float maximumDepth, float normalThreshold, float depthThreshold)
+    {
+        float4 size = GetSceneTextureViewSize(PPI_SceneDepth);
+        float2 pixel = (viewportUV + ResolvedView.TemporalAAParams.zw * size.zw) * size.xy - 0.5;
+        float2 base = floor(pixel);
+        float2 blend = frac(pixel);
+        float ink = 0.0;
+        const float2 axes[2] = { float2(1, 0), float2(0, 1) };
+        [unroll]
+        for (int tap = 0; tap < 4; ++tap)
+        {
+            float2 corner = float2(tap & 1, tap >> 1);
+            float2 tapUV = (base + corner + 0.5) * size.zw;
+            float depth = max(SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(tapUV,
+                PPI_SceneDepth), PPI_SceneDepth), PPI_SceneDepth, false).r, 1.0);
+            float3 normal = SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(tapUV,
+                PPI_WorldNormal), PPI_WorldNormal), PPI_WorldNormal, false).rgb;
+            float tapInk = 0.0;
+            [unroll]
+            for (int axis = 0; axis < 2; ++axis)
+            {
+                float ridgeNormal = 1.0;
+                float ridgeDepth = 1.0;
+                [unroll]
+                for (int side = 0; side < 2; ++side)
+                {
+                    float2 neighborUV = tapUV + axes[axis] * size.zw * (side == 0 ? -1.0 : 1.0);
+                    float neighborDepth = max(SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(neighborUV,
+                        PPI_SceneDepth), PPI_SceneDepth), PPI_SceneDepth, false).r, 1.0);
+                    float3 neighborNormal = SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(neighborUV,
+                        PPI_WorldNormal), PPI_WorldNormal), PPI_WorldNormal, false).rgb;
+                    // 两侧都与中心不同才补线，单侧大墙角继续交给原来的输出像素描边。
+                    // 深度只接受中心更近的凸起，避免把栏杆之间的背景缝隙涂成黑块。
+                    ridgeNormal = min(ridgeNormal, smoothstep(normalThreshold, normalThreshold + 0.16,
+                        1.0 - saturate(dot(normal, neighborNormal))) * (1.0 - step(maximumDepth, neighborDepth)));
+                    ridgeDepth = min(ridgeDepth, smoothstep(depthThreshold, depthThreshold * 2.0,
+                        1.0 - depth / neighborDepth));
+                }
+                tapInk = max(tapInk, max(ridgeNormal, ridgeDepth));
+            }
+            float coverage = (corner.x > 0.5 ? blend.x : 1.0 - blend.x)
+                * (corner.y > 0.5 ? blend.y : 1.0 - blend.y);
+            ink += tapInk * coverage * (1.0 - step(maximumDepth, depth));
+        }
+        return ink;
+    }
+
+    // 颜色输入已经经过 TSR，在最终输出分辨率上仍包含低分辨率 GBuffer 没有
+    // 保留下来的文字和细线。用对称二阶差分提取局部笔画，平缓照明渐变会抵消。
+    // 保留 RGB 对比而不是只比较亮度，避免深蓝广告底上的黑字再次被忽略。
+    float3 ResolvedColor(float2 viewportUV)
+    {
+        return SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(viewportUV,
+            PPI_PostProcessInput0), PPI_PostProcessInput0), PPI_PostProcessInput0, true).rgb;
+    }
+
+    float DetailContrast(float3 center, float3 first, float3 second)
+    {
+        float3 difference = abs(center - 0.5 * (first + second));
+        float3 reference = max(center, max(first, second));
+        // 对深色区域限制归一化分母，既保留黑字，也防止几乎全黑处的噪声被放大。
+        return max(difference.r, max(difference.g, difference.b))
+            / max(max(reference.r, max(reference.g, reference.b)), 0.08);
+    }
 };
 ProximityPencil pencil;
 
@@ -82,8 +150,9 @@ float surfaceMask;
 float4 centerAttributes = pencil.Attributes(viewportUV, MaxSubjectDepth, surfaceMask);
 float centerDepth = rcp(max(centerAttributes.w, 0.00000001));
 float3 centerNormal = centerAttributes.xyz;
-// 世界位置也必须使用同一份去抖的深度，不能再使用默认 WorldPosition 节点：
-// 默认节点取整采样会在轮廓旁切换到另一个表面，令距离边界和面内笔划滑动。
+// 排线的世界位置沿用去抖的倒数深度，避免默认 WorldPosition 的取整采样
+// 让面内笔划在相邻表面之间滑动。距离边界在下方独立逐 texel 计算，
+// 不用这份插值位置替代细前景的真实深度。
 float4 depthSize = GetSceneTextureViewSize(PPI_SceneDepth);
 float2 jitteredViewportUV = viewportUV + ResolvedView.TemporalAAParams.zw * depthSize.zw;
 float2 sceneUV = ViewportUVToSceneTextureUV(jitteredViewportUV, PPI_SceneDepth);
@@ -91,42 +160,8 @@ float2 bufferPixel = sceneUV * GetSceneTextureBufferSize(PPI_SceneDepth).xy;
 float deviceDepth = ConvertToDeviceZ(centerDepth);
 float3 surfacePosition = DFHackToFloat(SvPositionToWorld(float4(bufferPixel, deviceDepth, 1)));
 
-// 手办透明显示不在普通 GBuffer 中；它的专用材质按可见透明度写 241 Stencil。
-// 只为“距离判定”选择它的前景深度，轮廓 / 法线仍来自不透明建筑。
-// 同时检查比不透明表面更近，避免被墙遮住的 CustomDepth 反过来污染遮罩。
-float revealInverseDepth = 0.0;
-float revealCoverage = 0.0;
-float2 revealPixel = jitteredViewportUV * depthSize.xy - 0.5;
-float2 revealBase = floor(revealPixel);
-float2 revealBlend = frac(revealPixel);
-[unroll]
-for (int tap = 0; tap < 4; ++tap)
-{
-    float2 corner = float2(tap & 1, tap >> 1);
-    float2 tapUV = (revealBase + corner + 0.5) * depthSize.zw;
-    float opaqueDepth = max(SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(tapUV,
-        PPI_SceneDepth), PPI_SceneDepth), PPI_SceneDepth, false).r, 1.0);
-    float customDepth = SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(tapUV,
-        PPI_CustomDepth), PPI_CustomDepth), PPI_CustomDepth, false).r;
-    float stencil = SceneTextureLookup(ClampSceneTextureUV(ViewportUVToSceneTextureUV(tapUV,
-        PPI_CustomStencil), PPI_CustomStencil), PPI_CustomStencil, false).r;
-    float distanceDepth = abs(stencil - 241.0) < 0.5 && customDepth < opaqueDepth ? max(customDepth, 1.0) : opaqueDepth;
-    float weight = (corner.x > 0.5 ? revealBlend.x : 1.0 - revealBlend.x)
-        * (corner.y > 0.5 ? revealBlend.y : 1.0 - revealBlend.y);
-    revealInverseDepth += weight / distanceDepth;
-    revealCoverage += weight * (1.0 - step(MaxSubjectDepth, distanceDepth));
-}
-float3 revealPosition = DFHackToFloat(SvPositionToWorld(float4(bufferPixel,
-    ConvertToDeviceZ(rcp(max(revealInverseDepth, 0.00000001))), 1)));
-
-// 遮罩使用完整三维世界距离，中心由当前本地控制器的 Pawn 提供。
-// 同一面墙可跨越边界，镜头旋转、拉远或改变重力方向不会移动这个球形范围。
-// 没有有限深度的天空视作范围外的白纸；不对它的无穷大世界位置计算距离。
-float distanceToPlayer = length((revealPosition - PlayerPosition.rgb) * revealCoverage);
-float radius = max(NormalRadius, 0.0);
-float transition = max(TransitionWidth, 0.01);
-float sketchWeight = lerp(1.0, smoothstep(radius, radius + transition, distanceToPlayer), revealCoverage)
-    * saturate(EffectStrength);
+// 两通道必须嵌入同一份遮罩实现，细前景与背景各自计算范围再混合覆盖率。
+// PROXIMITY_DISTANCE_MASK
 
 // 最终颜色已经是输出分辨率；场景缓冲仍可能低于该分辨率，Attributes 中
 // 单独转换 GBuffer UV，并对其连续采样，避免窗口缩放和 TSR 降采样后错位。
@@ -142,12 +177,18 @@ float2 innerStep = max(finalPixelUV * StructureWidth * widthScale, inputPixelUV 
 float silhouetteEdge = 0.0;
 float normalEdge = 0.0;
 float depthEdge = 0.0;
+float detailContrast = 0.0;
 const float2 directions[4] = {
     float2(1, 0), float2(0, 1), float2(0.70710678, 0.70710678), float2(0.70710678, -0.70710678)
 };
 [unroll]
 for (int axis = 0; axis < 4; ++axis)
 {
+    // 在输出像素上找回 TSR 已解析的笔画；采样半径固定为一个输出像素，
+    // 不随低分辨率 GBuffer 放大，从而不会把邻近的中文字横竖笔画连成一团。
+    detailContrast = max(detailContrast, pencil.DetailContrast(SceneColor.rgb,
+        pencil.ResolvedColor(viewportUV - directions[axis] * finalPixelUV),
+        pencil.ResolvedColor(viewportUV + directions[axis] * finalPixelUV)));
     float pairDepth[2];
     float pairMask[2];
     [unroll]
@@ -178,6 +219,12 @@ for (int axis = 0; axis < 4; ++axis)
     depthEdge = max(depthEdge, discontinuity * validDepthPair
         * step(centerDepth, max(pairDepth[0], pairDepth[1])));
 }
+
+float thinGeometryEdge = pencil.ThinGeometry(viewportUV, MaxSubjectDepth, NormalThreshold, DepthThreshold);
+// 色彩细节只在有真实表面的像素上转成灰阶墨线，天空云层仍保持白纸。
+// DetailThreshold 过滤低对比的墙纸噪声；DetailStrength 可单独调节广告文字的浓度。
+float detailEdge = smoothstep(max(DetailThreshold, 0.001), max(DetailThreshold, 0.001) * 2.0,
+    detailContrast) * saturate(DetailStrength) * surfaceMask;
 
 // 原场景不是白模。从色调映射前的 HDR 输入读取照明，再用基础色亮度
 // 抵消材质颜色，避免对已经压缩的显示颜色直接做除法。
@@ -228,7 +275,8 @@ for (int projection = 0; projection < 3; ++projection)
 float paper = 1.0 - saturate(ShadingStrength) * tone * surfaceMask;
 float hatchCoverage = saturate(hatch * HatchStrength) * surfaceMask;
 float graphite = lerp(paper, 0.11, hatchCoverage);
-float edge = saturate(max(silhouetteEdge, max(normalEdge, depthEdge) * StructureStrength) * LineOpacity);
+float geometricEdge = max(normalEdge, max(depthEdge, thinGeometryEdge * saturate(ThinGeometryStrength)));
+float edge = saturate(max(detailEdge, max(silhouetteEdge, geometricEdge * StructureStrength)) * LineOpacity);
 float displayGray = lerp(graphite, InkDarkness, edge);
 
 // 遮罩视图是纯黑内圈、灰过渡、白外圈。原始视图直接返回最终场景输入，
