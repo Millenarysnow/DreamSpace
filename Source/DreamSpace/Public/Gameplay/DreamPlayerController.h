@@ -129,6 +129,8 @@ private:
 	friend class FDreamMiniatureDragMappingTest;
 	friend class FDreamMiniatureExtractionControllerTest;
 	friend class FDreamKeyPickupControllerTest;
+	/** 钥匙门集成测试走真实 E 射线与手办分发，不为自动化扩大正式玩法接口。 */
+	friend class FDreamKeyLockedRotationTest;
 	friend class FDreamMiniatureFocusLifecycleTest;
 	friend class FDreamMiniatureFocusTransitionTest;
 	friend class FDreamMiniatureInspectionRotationTest;

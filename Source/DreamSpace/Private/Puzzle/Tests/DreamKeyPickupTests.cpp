@@ -10,6 +10,8 @@
 #include "DreamHUD.h"
 #include "DreamMiniatureExtractableComponent.h"
 #include "DreamPlayerController.h"
+#include "DreamPivotPointComponent.h"
+#include "DreamRotatableComponent.h"
 #include "DreamSceneCapturePresentationComponent.h"
 #include "DreamSceneCaptureAnchor.h"
 #include "DreamShoulderCameraComponent.h"
@@ -118,7 +120,141 @@ struct FKeyPickupFixture
 		GEngine->DestroyWorldContext(World);
 	}
 };
+
+/** 只设置瞬时组件的私有配置，模拟详情面板；默认 0 秒步进可区分“开门”与独立时长的拒绝晃动。 */
+UDreamRotatableComponent* AddKeyLockedDoor(FKeyPickupFixture& Scene)
+{
+	AActor* Door = Scene.World->SpawnActor<AActor>();
+	UBoxComponent* Box = NewObject<UBoxComponent>(Door);
+	Box->SetMobility(EComponentMobility::Movable);
+	Box->SetBoxExtent(FVector(50, 5, 100));
+	Box->SetCollisionProfileName(TEXT("BlockAll"));
+	Door->SetRootComponent(Box);
+	Door->AddInstanceComponent(Box);
+	Box->RegisterComponent();
+	Door->SetActorLocation(FVector(1000, 0, 1000));
+	UDreamPivotPointComponent* Pivot = NewObject<UDreamPivotPointComponent>(Door);
+	Pivot->SetupAttachment(Box);
+	Pivot->SetRelativeLocation(FVector(-50, 0, 0));
+	Door->AddInstanceComponent(Pivot);
+	Pivot->RegisterComponent();
+	UDreamRotatableComponent* Rotation = NewObject<UDreamRotatableComponent>(Door);
+	Door->AddInstanceComponent(Rotation);
+	Rotation->RegisterComponent();
+	Rotation->Activate(true);
+	FindFProperty<FBoolProperty>(Rotation->GetClass(), TEXT("bRequiresKey"))->SetPropertyValue_InContainer(Rotation, true);
+	FindFProperty<FFloatProperty>(Rotation->GetClass(), TEXT("RotationDuration"))->SetPropertyValue_InContainer(Rotation, 0.0f);
+	return Rotation;
+}
 } // namespace
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamKeyLockedRotationTest,
+	"DreamSpace.Puzzle.KeyLock.WorldERejectsThenRealPickupAllowsRotation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamKeyLockedRotationTest::RunTest(const FString& Parameters)
+{
+	FKeyPickupFixture Scene;
+	UDreamRotatableComponent* Rotation = AddKeyLockedDoor(Scene);
+	AActor* Door = Rotation->GetOwner();
+	const FTransform Start = Door->GetActorTransform();
+	Scene.AimAt(Door);
+	Scene.Controller->Interact();
+	TestTrue(TEXT("真实 E 分发在无钥匙时显示中央提示并开始短暂反馈"),
+		Rotation->IsRotating() && Scene.HUD->IsNeedsKeyMessageVisible());
+	TestFalse(TEXT("拒绝交互不改变人物钥匙状态"), Scene.Character->bHasKey);
+	Rotation->TickComponent(0.04f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("0 秒正常步进配置仍有可见的小角度晃动"), Door->GetActorRotation().Yaw > 0.1f &&
+		FMath::Abs(Door->GetActorRotation().Yaw) < 2.0f && !Door->GetActorLocation().Equals(Start.GetLocation(), 0.01));
+	const FTransform DuringShake = Door->GetActorTransform();
+	Scene.World->RealTimeSeconds = 0.5;
+	Scene.Controller->Interact();
+	TestTrue(TEXT("重复 E 不叠加姿态或重建反馈起点"), Door->GetActorTransform().Equals(DuringShake));
+	Rotation->TickComponent(0.7f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("拒绝反馈结束后精确恢复偏心枢轴的原位置、角度与缩放"),
+		!Rotation->IsRotating() && Door->GetActorTransform().Equals(Start, 0.0001));
+	Scene.World->RealTimeSeconds = 2.4;
+	TestTrue(TEXT("重复尝试刷新提示有效期"), Scene.HUD->IsNeedsKeyMessageVisible());
+	Scene.World->RealTimeSeconds = 2.6;
+	TestFalse(TEXT("提示到期正常消失"), Scene.HUD->IsNeedsKeyMessageVisible());
+
+	Rotation->TriggerRotation();
+	Rotation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("无参数蓝图/C++ 入口不能绕过钥匙检查"), Door->GetActorTransform().Equals(Start));
+	Rotation->TriggerRotation(Scene.World->SpawnActor<AActor>());
+	Rotation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("非玩家操作者不能绕过钥匙检查"), Door->GetActorTransform().Equals(Start));
+
+	Scene.Controller->SetMiniatureInteractionMode(true);
+	Scene.Controller->DispatchInteraction(Door, Door->GetRootComponent(), FVector::ZeroVector, FVector::ForwardVector);
+	Rotation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("手办模式分发也受同一钥匙条件限制"), Door->GetActorTransform().Equals(Start));
+	Scene.Controller->SetMiniatureInteractionMode(false);
+	Scene.AimAt(Door);
+	Scene.Controller->Interact();
+	Rotation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("成功拾取前重新显示需要钥匙提示"), Scene.HUD->IsNeedsKeyMessageVisible());
+	ADreamDroppedKey* Key = Scene.Commit();
+	if (!TestNotNull(TEXT("仍由真实取出流程生成钥匙"), Key))
+		return false;
+	Scene.AimAt(Key);
+	Scene.Controller->Interact();
+	TestTrue(TEXT("实际钥匙拾取设置 bool 并立即清除旧拒绝提示"), Scene.Character->bHasKey &&
+		!Scene.HUD->IsNeedsKeyMessageVisible() && Scene.HUD->IsKeyAcquiredMessageVisible());
+	Scene.AimAt(Door);
+	Scene.Controller->Interact();
+	TestTrue(TEXT("持有钥匙后真实 E 完成正常 90 度步进"), Door->GetActorRotation().Equals(FRotator(0, 90, 0), 0.001));
+	TestTrue(TEXT("机关检查不消耗玩家的钥匙"), Scene.Character->bHasKey);
+	TestFalse(TEXT("允许转动不再显示需要钥匙提示"), Scene.HUD->IsNeedsKeyMessageVisible());
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamKeyLockedRotationCleanupTest,
+	"DreamSpace.Puzzle.KeyLock.InterruptedShakeCollisionAndDisabledCompatibility",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamKeyLockedRotationCleanupTest::RunTest(const FString& Parameters)
+{
+	FKeyPickupFixture Scene;
+	UDreamRotatableComponent* Rotation = AddKeyLockedDoor(Scene);
+	AActor* Door = Rotation->GetOwner();
+	const FTransform Start = Door->GetActorTransform();
+	Rotation->TriggerRotation(Scene.Character);
+	Rotation->TickComponent(0.04f, LEVELTICK_All, nullptr);
+	Rotation->Deactivate();
+	TestTrue(TEXT("停用组件立即取消晃动并恢复精确原位"), !Rotation->IsRotating() && Door->GetActorTransform().Equals(Start));
+	Rotation->Activate(true);
+	Rotation->TriggerRotation(Scene.Character);
+	Rotation->TickComponent(0.04f, LEVELTICK_All, nullptr);
+	Rotation->DestroyComponent();
+	TestTrue(TEXT("动态移除组件也不会把门留在拒绝偏移姿态"), Door->GetActorTransform().Equals(Start));
+	Door->Destroy();
+
+	Rotation = AddKeyLockedDoor(Scene);
+	Door = Rotation->GetOwner();
+	FindFProperty<FBoolProperty>(Rotation->GetClass(), TEXT("bRequiresKey"))->SetPropertyValue_InContainer(Rotation, false);
+	Rotation->TriggerRotation();
+	TestTrue(TEXT("未勾选钥匙条件时旧无参数入口正常完成转动"), Door->GetActorRotation().Equals(FRotator(0, 90, 0), 0.001));
+	Door->Destroy();
+
+	Rotation = AddKeyLockedDoor(Scene);
+	Door = Rotation->GetOwner();
+	FindFProperty<FBoolProperty>(Rotation->GetClass(), TEXT("bConsiderCollision"))->SetPropertyValue_InContainer(Rotation, true);
+	AActor* Wall = Scene.World->SpawnActor<AActor>();
+	UBoxComponent* Box = NewObject<UBoxComponent>(Wall);
+	Box->SetMobility(EComponentMobility::Movable);
+	Box->SetBoxExtent(FVector(55, 5, 100));
+	Box->SetCollisionProfileName(TEXT("BlockAll"));
+	Wall->SetRootComponent(Box);
+	Wall->AddInstanceComponent(Box);
+	Box->RegisterComponent();
+	Wall->SetActorLocation(Door->GetActorLocation() + FVector(0, 10.1, 0));
+	Rotation->TriggerRotation(Scene.Character);
+	Rotation->TickComponent(0.04f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("紧贴墙体时小角度反馈也遵守碰撞并回到原位"), !Rotation->IsRotating() && Door->GetActorTransform().Equals(Start));
+	TestTrue(TEXT("反馈被碰撞阻止仍显示需要钥匙"), Scene.HUD->IsNeedsKeyMessageVisible());
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamKeyPickupControllerTest,
 	"DreamSpace.Puzzle.KeyPickup.ExtractThenWorldEConsumesKeyAndShowsTimedMessage",

@@ -15,6 +15,10 @@ public:
 	/** 按真实经过时间判断提示是否可见，不依赖 Tick，也不会因切换手办模式而永久残留。 */
 	bool IsKeyAcquiredMessageVisible() const;
 
+	/** 钥匙门拒绝交互时调用；与获得提示共用居中文字样式，重复尝试只刷新有效期。 */
+	void ShowNeedsKeyMessage();
+	bool IsNeedsKeyMessageVisible() const;
+
 	/** 光点实际拾取后显示手办解锁提示；输入正确但仍在开盖时不会调用。 */
 	void ShowMiniatureAcquiredMessage();
 	bool IsMiniatureAcquiredMessageVisible() const;
@@ -26,6 +30,11 @@ private:
 
 	/** 当前提示的到期时间；HUD 随玩家销毁后自然清理，无需额外注册计时器。 */
 	double KeyAcquiredMessageUntil = 0.0;
+
+	/** “需要钥匙”只是一条临时交互反馈，不修改角色持有 bool，也不阻塞移动或其它交互。 */
+	UPROPERTY(EditDefaultsOnly, Category = "提示|钥匙", meta = (ClampMin = "0.1", UIMin = "0.1"))
+	float NeedsKeyMessageDuration = 2.0f;
+	double NeedsKeyMessageUntil = 0.0;
 
 	/** 手办提示与钥匙提示分别计时，模式切换不会清除尚未到期的获得信息。 */
 	UPROPERTY(EditDefaultsOnly, Category = "提示|手办", meta = (ClampMin = "0.1"))

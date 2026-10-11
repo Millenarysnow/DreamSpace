@@ -147,6 +147,32 @@ bool FDreamRotationGravityDisabledTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamLockedRotationGravityTest,
+	"DreamSpace.Puzzle.KeyLock.ShakeReturnsStandingCharacterGravityAndView",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamLockedRotationGravityTest::RunTest(const FString& Parameters)
+{
+	FGravityFixture Scene;
+	Scene.EnableGravity();
+	SetBool(Scene.Rotation, TEXT("bRequiresKey"), true);
+	const FTransform PlatformStart = Scene.Platform->GetActorTransform();
+	const FTransform CharacterStart = Scene.Character->GetActorTransform();
+	const FQuat ViewStart = Scene.Controller->GetControlRotation().Quaternion();
+	const FVector GravityStart = Scene.Character->GetCharacterMovement()->GetGravityDirection();
+	Scene.Rotation->TriggerRotation(Scene.Character);
+	Scene.Rotation->TickComponent(0.04f, LEVELTICK_All, nullptr);
+	TestFalse(TEXT("实际站立角色在拒绝晃动期间同步倾斜重力"),
+		Scene.Character->GetCharacterMovement()->GetGravityDirection().Equals(GravityStart, 0.001));
+	Scene.Rotation->TickComponent(1.0f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("锁定晃动结束后平台姿态回正"), Scene.Platform->GetActorTransform().Equals(PlatformStart, 0.001));
+	TestTrue(TEXT("仍站立角色的位置及胶囊姿态随往复晃动恢复"), Scene.Character->GetActorTransform().Equals(CharacterStart, 0.001));
+	TestTrue(TEXT("未开门时往复晃动不残留玩家重力偏转"),
+		Scene.Character->GetCharacterMovement()->GetGravityDirection().Equals(GravityStart, 0.001));
+	TestTrue(TEXT("站立角色视角随平台回正"), Scene.Controller->GetControlRotation().Quaternion().Equals(ViewStart, 0.001));
+	return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamRotationGravityWalkingTest,
 	"DreamSpace.Puzzle.RotationGravity.SmoothStandingWalkingAndLeaving",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

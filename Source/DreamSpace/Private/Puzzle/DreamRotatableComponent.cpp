@@ -3,10 +3,20 @@
 #include "DreamInteractionCollision.h"
 #include "DreamRotationSupport.h"
 #include "DreamPuzzleDebug.h"
+#include "DreamCharacter.h"
+#include "DreamHUD.h"
 #include "DreamSpace.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/PlayerController.h"
+
+namespace
+{
+	// 钥匙条件是当前谜题的固定规则；反馈角度与时长独立于正常步进，0 秒开门也能给出可见反馈。
+	constexpr float LockedFeedbackDuration = 0.35f;
+	constexpr float LockedFeedbackAngleDegrees = 2.0f;
+}
 
 UDreamRotatableComponent::UDreamRotatableComponent()
 {
@@ -32,6 +42,25 @@ void UDreamRotatableComponent::BeginPlay()
 	}
 }
 
+void UDreamRotatableComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopLockedFeedback();
+	Super::EndPlay(EndPlayReason);
+}
+
+void UDreamRotatableComponent::OnComponentDestroyed(bool bDestroyingHierarchy)
+{
+	StopLockedFeedback();
+	Super::OnComponentDestroyed(bDestroyingHierarchy);
+}
+
+void UDreamRotatableComponent::Deactivate()
+{
+	// 停用后引擎不会再 Tick，必须立即回正，不能留下尚未完成的锁定晃动姿态。
+	StopLockedFeedback();
+	Super::Deactivate();
+}
+
 void UDreamRotatableComponent::TickComponent(
 	float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
@@ -48,6 +77,7 @@ void UDreamRotatableComponent::TickComponent(
 	{
 		bRotating = false;
 		bReturning = false;
+		bPlayingLockedFeedback = false;
 		return;
 	}
 
@@ -55,6 +85,12 @@ void UDreamRotatableComponent::TickComponent(
 	// 下一帧重新判断底座与移动模式，角色走下或跳离后立即停止跟随，重力值则自然保留。
 	TArray<ACharacter*> StandingCharacters;
 	GatherStandingCharacters(StandingCharacters);
+
+	if (bPlayingLockedFeedback)
+	{
+		UpdateLockedFeedback(DeltaTime, StandingCharacters);
+		return;
+	}
 
 	if (bReturning)
 	{
@@ -100,16 +136,24 @@ void UDreamRotatableComponent::TickComponent(
 
 void UDreamRotatableComponent::OnInteracted_Implementation(AActor* Interactor)
 {
-	// 交互入口只转发到 TriggerRotation，蓝图或其他系统也可以直接调用后者。
-	TriggerRotation();
+	// 将真实操作者传给统一入口；世界 E、手办点击和蓝图调用执行同一份钥匙判断。
+	TriggerRotation(Interactor);
 }
 
-void UDreamRotatableComponent::TriggerRotation()
+void UDreamRotatableComponent::TriggerRotation(AActor* Interactor)
 {
 	UE_LOG(LogDreamSpace, Verbose, TEXT("可转动组件触发：Actor=%s CachedPivot=%s"),
 		*GetNameSafe(GetOwner()), *GetNameSafe(CachedPivot.Get()));
+	const ADreamCharacter* Character = IsValid(Interactor) ? Cast<ADreamCharacter>(Interactor) : nullptr;
+	const bool bMissingKey = bRequiresKey &&
+		(!Character || Character->GetWorld() != GetWorld() || !Character->bHasKey);
+	if (bMissingKey)
+		ShowNeedsKeyMessage(Interactor);
 	if (bRotating)
 	{
+		// 反复敲击锁定机关可以刷新提示，但不重启晃动、不改快照，也不污染日志为正常转动警告。
+		if (bPlayingLockedFeedback)
+			return;
 		const AActor* Owner = GetOwner();
 		UE_LOG(LogDreamSpace, Warning, TEXT("可转动组件：Actor [%s] 正在转动中，本次触发被忽略。"),
 			*GetNameSafe(Owner));
@@ -136,6 +180,19 @@ void UDreamRotatableComponent::TriggerRotation()
 	PivotWorldLocation = CachedPivot->GetComponentLocation();
 	FullStepQuat = FQuat(AxisDir, FMath::DegreesToRadians(StepAngleDegrees));
 	StartActorTransform = Owner->GetActorTransform();
+
+	if (bMissingKey)
+	{
+		// 保存本次反馈专用的小角度，后续带符号的进度会让它正反晃动，完全不使用正常步进角。
+		// 钥匙在动画中途获得也需等回正后再次交互，避免在偏移姿态上继续执行一次完整开门。
+		const float Direction = StepAngleDegrees < 0.0f ? -1.0f : 1.0f;
+		FullStepQuat = FQuat(AxisDir, FMath::DegreesToRadians(LockedFeedbackAngleDegrees * Direction));
+		LockedFeedbackElapsed = 0.0f;
+		bReturning = false;
+		bPlayingLockedFeedback = true;
+		bRotating = true;
+		return;
+	}
 
 	if (RotationDuration <= 0.0f)
 	{
@@ -167,10 +224,99 @@ FTransform UDreamRotatableComponent::GetActorTransformAtAlpha(float Alpha) const
 	// 使用触发瞬间固定的枢轴、起始姿态与完整步进四元数。
 	// 同一个 Alpha 在前进和回弹时得到完全相同的姿态，不会产生累计漂移。
 	const FQuat PartialQuat = FQuat::Slerp(FQuat::Identity, FullStepQuat, Alpha);
+	return GetActorTransformForRotation(PartialQuat);
+}
+
+FTransform UDreamRotatableComponent::GetActorTransformForRotation(const FQuat& Rotation) const
+{
 	const FVector NewLocation = PivotWorldLocation
-		+ PartialQuat * (StartActorTransform.GetLocation() - PivotWorldLocation);
-	return FTransform(PartialQuat * StartActorTransform.GetRotation(), NewLocation,
+		+ Rotation * (StartActorTransform.GetLocation() - PivotWorldLocation);
+	return FTransform(Rotation * StartActorTransform.GetRotation(), NewLocation,
 		StartActorTransform.GetScale3D());
+}
+
+void UDreamRotatableComponent::ShowNeedsKeyMessage(AActor* Interactor) const
+{
+	// 仅使用本次角色的控制器和 HUD；无操作者或跨世界调用仍拒绝转动，但不能通知无关的玩家。
+	const ADreamCharacter* Character = IsValid(Interactor) ? Cast<ADreamCharacter>(Interactor) : nullptr;
+	if (!Character || Character->GetWorld() != GetWorld())
+		return;
+	if (const APlayerController* Controller = Cast<APlayerController>(Character->GetController()))
+		if (ADreamHUD* HUD = Cast<ADreamHUD>(Controller->GetHUD()))
+			HUD->ShowNeedsKeyMessage();
+}
+
+void UDreamRotatableComponent::UpdateLockedFeedback(float DeltaTime, const TArray<ACharacter*>& StandingCharacters)
+{
+	AActor* Owner = GetOwner();
+	if (!IsValid(Owner) || !FMath::IsFinite(DeltaTime))
+	{
+		StopLockedFeedback();
+		return;
+	}
+	const float FromTime = LockedFeedbackElapsed;
+	const float TargetTime = FMath::Min(LockedFeedbackDuration, FromTime + FMath::Max(0.0f, DeltaTime));
+	TArray<AActor*> MovingActors;
+	MovingActors.Add(Owner);
+	float Radius = 0.0f;
+	if (bConsiderCollision)
+		Radius = DreamInteractionCollision::GetMaxCollisionRadius(Owner, PivotWorldLocation);
+	for (ACharacter* Character : StandingCharacters)
+	{
+		MovingActors.Add(Character);
+		if (bConsiderCollision)
+			Radius = FMath::Max(Radius, DreamInteractionCollision::GetMaxCollisionRadius(Character, PivotWorldLocation));
+	}
+
+	// 一帧可能跨越正反两次摆动，因此不能只检查最终姿态。按时间细分完整曲线，
+	// 并以最大角速度约束最远碰撞点每步不超过 2 cm，偏心长门和站立角色都不会跨过薄障碍。
+	const float MaxAngularSpeed = FMath::DegreesToRadians(LockedFeedbackAngleDegrees) *
+		(4.0f * PI + 2.0f) / LockedFeedbackDuration;
+	const float MaxTimeStep = FMath::Min(1.0f / 120.0f, 2.0f / FMath::Max(Radius * MaxAngularSpeed, KINDA_SMALL_NUMBER));
+	const int32 Steps = bConsiderCollision ? FMath::Max(1, FMath::CeilToInt((TargetTime - FromTime) / MaxTimeStep)) : 1;
+	for (int32 Index = 1; Index <= Steps; ++Index)
+	{
+		const float SampleTime = FMath::Lerp(FromTime, TargetTime, static_cast<float>(Index) / Steps);
+		const float Progress = SampleTime / LockedFeedbackDuration;
+		// 两次往复、逐渐衰减；正负值都围绕触发时的原姿态计算，避免每帧累加造成长期角度漂移。
+		const float Alpha = FMath::Sin(4.0f * PI * Progress) * FMath::Square(1.0f - Progress);
+		const FTransform Target = GetActorTransformAtAlpha(Alpha);
+		if (bConsiderCollision)
+		{
+			bool bBlocked = DreamInteractionCollision::FindSafeMoveFraction(Owner, Target, MovingActors) < 1.0f;
+			for (const ACharacter* Character : StandingCharacters)
+			{
+				const FTransform CharacterTarget = GetStandingCharacterTransform(Character, Target);
+				bBlocked |= DreamInteractionCollision::FindSafeMoveFraction(Character, CharacterTarget, MovingActors) < 1.0f;
+			}
+			if (bBlocked)
+			{
+				StopLockedFeedback();
+				return;
+			}
+		}
+		ApplyActorTransform(Target, StandingCharacters);
+	}
+	LockedFeedbackElapsed = TargetTime;
+	if (LockedFeedbackElapsed >= LockedFeedbackDuration)
+		StopLockedFeedback();
+}
+
+void UDreamRotatableComponent::StopLockedFeedback()
+{
+	if (!bPlayingLockedFeedback)
+		return;
+	if (IsValid(GetOwner()))
+	{
+		// 最后直接写入快照，消除 sin/四元数插值尾端误差；生命周期中断也走相同恢复流程。
+		TArray<ACharacter*> StandingCharacters;
+		GatherStandingCharacters(StandingCharacters);
+		ApplyActorTransform(StartActorTransform, StandingCharacters);
+	}
+	bPlayingLockedFeedback = false;
+	bRotating = false;
+	bReturning = false;
+	LockedFeedbackElapsed = 0.0f;
 }
 
 bool UDreamRotatableComponent::AdvanceWithCollision(float TargetAlpha, const TArray<ACharacter*>& StandingCharacters)

@@ -30,6 +30,7 @@ enum class EDreamPivotRotationAxis : uint8
  *   绕“过枢轴点的目标轴”公转 + 自转；RotationDuration 为 0 时瞬间完成；
  * - 转动进行中再次触发会被忽略，避免姿态叠加出错。
  * - 可选开启站立角色重力跟随：角色随平台转动，离开后仍保留最后的世界重力方向。
+ * - 可选要求操作者持有钥匙：读取 DreamCharacter.bHasKey，未持有时短暂晃动并显示“需要钥匙”。
  *
  * 由于枢轴点是一个独立组件，策划可以自由摆放它的位置和朝向，
  * 从而实现门绕铰链转、机关绕任意斜轴转等效果，而不需要修改代码。
@@ -45,15 +46,22 @@ public:
 	UDreamRotatableComponent();
 
 	virtual void BeginPlay() override;
+	/** 锁定晃动被关卡卸载、动态移除或停用打断时，立即恢复抓取前的精确姿态。 */
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void OnComponentDestroyed(bool bDestroyingHierarchy) override;
+	virtual void Deactivate() override;
 	virtual void TickComponent(
 		float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 	//~ IDreamInteractableInterface 接口：玩家交互时触发一次转动。
 	virtual void OnInteracted_Implementation(AActor* Interactor) override;
 
-	/** 立即触发一次转动；转动进行中再次调用会被忽略并输出警告日志。 */
+	/**
+	 * 手动触发一次转动；需要钥匙时必须传入持有钥匙的 DreamCharacter，不能用无参数调用绕过门锁。
+	 * 未开启钥匙条件时仍允许沿用旧的无参数蓝图/C++ 调用。转动或拒绝晃动期间不会叠加新的动画。
+	 */
 	UFUNCTION(BlueprintCallable, Category = "可转动")
-	void TriggerRotation();
+	void TriggerRotation(AActor* Interactor = nullptr);
 
 	/** 当前是否正在转动中。 */
 	UFUNCTION(BlueprintPure, Category = "可转动")
@@ -92,6 +100,16 @@ private:
 	float RotationDuration = 0.5f;
 
 	/**
+	 * 默认关闭，开启后世界 E 和手办左键共用操作者身上的 bHasKey 检查。
+	 * 无钥匙、无操作者或操作者不是本世界的 DreamCharacter 时不执行步进，
+	 * 只绕配置转轴做约 0.35 秒、最大 2 度的衰减晃动并精确回到原位；有效玩家 HUD 显示“需要钥匙”。
+	 * 持有钥匙时恢复原有转动/碰撞/重力流程；不消耗钥匙，也不在机关上保存另一份解锁 bool。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "可转动|钥匙",
+		meta = (AllowPrivateAccess = "true", DisplayName = "交互需要钥匙"))
+	bool bRequiresKey = false;
+
+	/**
 	 * 开启后，运动会检测所属 Actor 上随根一起移动的查询碰撞组件。
 	 * 转动中途碰到阻挡物会沿原路径弹回本次交互的起始姿态；默认关闭以兼容已有机关。
 	 * 网格或碰撞体需要启用 Query 碰撞，并与障碍物互相设置为 Block。
@@ -123,6 +141,9 @@ private:
 
 	/** 是否正在转动中。 */
 	bool bRotating = false;
+	/** 无钥匙反馈占用同一转动会话，避免连续点击导致姿态漂移或同时播放正常步进。 */
+	bool bPlayingLockedFeedback = false;
+	float LockedFeedbackElapsed = 0.0f;
 	/** 本次转动已经过的时间（秒）。 */
 	float RotationElapsed = 0.0f;
 	/** 正在从首次受阻处回到本次起始姿态；此期间仍视为转动中，新的交互会被忽略。 */
@@ -153,6 +174,18 @@ private:
 
 	/** 按本次交互的起点和进度计算世界姿态；前进和回弹共用同一条精确轨迹。 */
 	FTransform GetActorTransformAtAlpha(float Alpha) const;
+
+	/** 正常步进与正负晃动共用枢轴快照，把给定增量旋转转换为完整 Actor 世界变换。 */
+	FTransform GetActorTransformForRotation(const FQuat& Rotation) const;
+
+	/** 只通知本次操作者的 HUD；不寻找全局玩家，避免把提示显示给其它角色。 */
+	void ShowNeedsKeyMessage(AActor* Interactor) const;
+
+	/** 更新衰减晃动；复用平台与站立角色同步，并遵守本组件已开启的运动碰撞。 */
+	void UpdateLockedFeedback(float DeltaTime, const TArray<ACharacter*>& StandingCharacters);
+
+	/** 到期、受阻和生命周期中断都精确恢复快照，不以累计角度减法回正。 */
+	void StopLockedFeedback();
 
 	/** 沿旋转弧线检查并推进到目标进度；遇阻时停在最后一个安全姿态。 */
 	bool AdvanceWithCollision(float TargetAlpha, const TArray<ACharacter*>& StandingCharacters);

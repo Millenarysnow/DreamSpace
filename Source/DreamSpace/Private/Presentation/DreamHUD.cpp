@@ -8,6 +8,8 @@
 
 void ADreamHUD::ShowKeyAcquiredMessage()
 {
+	// 实际拾取成功后立即替换旧的拒绝提示，不能让“需要钥匙”覆盖已经获得钥匙的结果。
+	NeedsKeyMessageUntil = 0.0;
 	if (GetWorld())
 		KeyAcquiredMessageUntil = GetWorld()->GetRealTimeSeconds() + KeyAcquiredMessageDuration;
 }
@@ -15,6 +17,17 @@ void ADreamHUD::ShowKeyAcquiredMessage()
 bool ADreamHUD::IsKeyAcquiredMessageVisible() const
 {
 	return GetWorld() && GetWorld()->GetRealTimeSeconds() < KeyAcquiredMessageUntil;
+}
+
+void ADreamHUD::ShowNeedsKeyMessage()
+{
+	if (GetWorld())
+		NeedsKeyMessageUntil = GetWorld()->GetRealTimeSeconds() + NeedsKeyMessageDuration;
+}
+
+bool ADreamHUD::IsNeedsKeyMessageVisible() const
+{
+	return GetWorld() && GetWorld()->GetRealTimeSeconds() < NeedsKeyMessageUntil;
 }
 
 void ADreamHUD::ShowMiniatureAcquiredMessage()
@@ -107,11 +120,13 @@ void ADreamHUD::DrawHUD()
 	}
 	const float CenterX = Canvas->ClipX * 0.5f;
 	const float CenterY = Canvas->ClipY * 0.5f;
-	if (IsMiniatureAcquiredMessageVisible() || IsKeyAcquiredMessageVisible())
+	if (IsNeedsKeyMessageVisible() || IsMiniatureAcquiredMessageVisible() || IsKeyAcquiredMessageVisible())
 	{
 		// 用实际字体测量整行文字，再按宽高各减去一半，确保文字本身位于视口正中央。
 		// 黑色阴影保证浅色地面上的可读性；提示期间不画重叠的准星，切换手办模式仍显示提示。
-		const FString Message = IsMiniatureAcquiredMessageVisible() ? TEXT("已获得手办，按 Tab 观察") : TEXT("已获得钥匙");
+		// 拒绝反馈优先于尚未到期的手办提示；钥匙拾取会主动清除拒绝提示，因此不会显示互相矛盾的信息。
+		const FString Message = IsNeedsKeyMessageVisible() ? TEXT("需要钥匙") :
+			IsMiniatureAcquiredMessageVisible() ? TEXT("已获得手办，按 Tab 观察") : TEXT("已获得钥匙");
 		UFont* Font = GEngine->GetLargeFont();
 		// 引擎默认的 LargeFont 也可能只有 10 pt，单独放大获得提示，确保主视口里可以直接读到。
 		const float TextScale = 2.0f;
