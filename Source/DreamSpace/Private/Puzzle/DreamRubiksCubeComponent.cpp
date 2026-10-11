@@ -200,20 +200,39 @@ bool UDreamRubiksCubeComponent::BuildVisuals()
 {
 	AActor* Owner = GetOwner();
 	USceneComponent* Root = Owner->GetRootComponent();
+	// 自定义模型配置较多，必须指出第一个不满足的具体条件；只输出“初始化失败”无法区分
+	// 绑定引用失效、挂接层级错误和中心/数组顺序不符，关卡作者也就无法在详情面板中修正。
+	const auto RejectConfiguration = [this, Owner](const FString& Reason)
+	{
+		UE_LOG(
+			LogDreamSpace, Warning, TEXT("二阶魔方 [%s/%s] 初始化失败：%s"), *GetNameSafe(Owner), *GetName(), *Reason);
+		return false;
+	};
 	if (!bGenerateVisuals)
 	{
 		if (CornerComponents.Num() != 8)
-			return false;
+			return RejectConfiguration(
+				FString::Printf(TEXT("自定义角块需要 8 项，当前为 %d 项。"), CornerComponents.Num()));
 		TSet<USceneComponent*> UniqueCorners;
 		for (const FComponentReference& Reference : CornerComponents)
 		{
 			USceneComponent* Corner = Cast<USceneComponent>(Reference.GetComponent(Owner));
-			if (!IsValid(Corner) || Corner == Root || Corner->GetOwner() != Owner ||
-				Corner->GetAttachParent() != Root || UniqueCorners.Contains(Corner) ||
-				Corner->Mobility != EComponentMobility::Movable || Corner->IsUsingAbsoluteLocation() ||
+			const int32 Index = CornerRoots.Num();
+			if (!IsValid(Corner))
+				return RejectConfiguration(FString::Printf(TEXT("角块[%d] 引用无法解析，组件属性=%s，组件路径=%s。"),
+					Index, *Reference.ComponentProperty.ToString(), *Reference.PathToComponent));
+			if (Corner == Root || Corner->GetOwner() != Owner || Corner->GetAttachParent() != Root)
+				return RejectConfiguration(
+					FString::Printf(TEXT("角块[%d] %s 必须属于同一 Actor 并直接挂在根组件 %s 下，当前父组件为 %s。"),
+						Index, *Corner->GetName(), *Root->GetName(), *GetNameSafe(Corner->GetAttachParent())));
+			if (UniqueCorners.Contains(Corner))
+				return RejectConfiguration(FString::Printf(
+					TEXT("角块[%d] %s 重复绑定，请为八项选择八个不同组件。"), Index, *Corner->GetName()));
+			if (Corner->Mobility != EComponentMobility::Movable || Corner->IsUsingAbsoluteLocation() ||
 				Corner->IsUsingAbsoluteRotation() || Corner->IsUsingAbsoluteScale() ||
 				Corner->GetRelativeTransform().ContainsNaN())
-				return false;
+				return RejectConfiguration(FString::Printf(
+					TEXT("角块[%d] %s 必须为 Movable，使用相对变换且变换值有效。"), Index, *Corner->GetName()));
 			UniqueCorners.Add(Corner);
 			// 自定义角块可以由多个子网格组成，但它们不能自行模拟物理或保持绝对世界姿态。
 			TArray<USceneComponent*> Children;
@@ -223,17 +242,25 @@ bool UDreamRubiksCubeComponent::BuildVisuals()
 			{
 				if (Child->Mobility != EComponentMobility::Movable || Child->IsUsingAbsoluteLocation() ||
 					Child->IsUsingAbsoluteRotation() || Child->IsUsingAbsoluteScale())
-					return false;
+					return RejectConfiguration(
+						FString::Printf(TEXT("角块[%d] %s 的子组件 %s 必须为 Movable 且使用相对变换。"), Index,
+							*Corner->GetName(), *Child->GetName()));
 				if (const UPrimitiveComponent* Primitive = Cast<UPrimitiveComponent>(Child))
 					if (Primitive->IsSimulatingPhysics())
-						return false;
+						return RejectConfiguration(
+							FString::Printf(TEXT("角块[%d] %s 的组件 %s 开启了模拟物理，需关闭后由魔方控制姿态。"),
+								Index, *Corner->GetName(), *Child->GetName()));
 			}
 			// 模型位置应与绑定身份的三个正/负半空间一致，防止错误顺序导致拖错层。
 			const FVector Offset = Corner->GetRelativeLocation() - CubeCenter;
 			const FIntVector Home = HomeCoordinate(CornerRoots.Num());
 			for (int32 Axis = 0; Axis < 3; ++Axis)
 				if (Offset[Axis] * Home[Axis] <= UE_SMALL_NUMBER)
-					return false;
+					return RejectConfiguration(FString::Printf(
+						TEXT("角块[%d] %s 位置与绑定顺序不符：相对位置=%s，魔方中心=%s，预期 XYZ 符号=%s。")
+							TEXT("请将魔方中心设在八角块中央，再按 ---、--+、-+-、-++、+--、+-+、++-、+++ 绑定。"),
+						Index, *Corner->GetName(), *Corner->GetRelativeLocation().ToString(), *CubeCenter.ToString(),
+						*Home.ToString()));
 			CornerRoots.Add(Corner);
 		}
 		return true;
@@ -621,11 +648,21 @@ bool UDreamRubiksCubeComponent::PickCorner(
 bool UDreamRubiksCubeComponent::BeginDrag(AActor* Interactor, const FVector& RayOrigin, const FVector& RayDirection)
 {
 	if (bTurning || bNotifying || IsDragging() || !IsActive() || !EnsureInitialized())
+	{
+		UE_LOG(LogDreamSpace, Verbose,
+			TEXT(
+				"二阶魔方 [%s] 拒绝抓取：状态不可用（Turning=%d Notifying=%d Dragging=%d Active=%d Initialized=%d）。"),
+			*GetName(), bTurning, bNotifying, IsDragging(), IsActive(), bInitialized);
 		return false;
+	}
 	int32 CornerIndex;
 	FHitResult Hit;
 	if (!PickCorner(RayOrigin, RayDirection, CornerIndex, Hit))
+	{
+		UE_LOG(LogDreamSpace, Verbose, TEXT("二阶魔方 [%s] 拒绝抓取：八个角块均未命中。起点=%s 方向=%s。"), *GetName(),
+			*RayOrigin.ToString(), *RayDirection.ToString());
 		return false;
+	}
 	const FTransform RootTransform = GetOwner()->GetRootComponent()->GetComponentTransform();
 	const FVector LocalHit = RootTransform.InverseTransformPosition(Hit.ImpactPoint) - CubeCenter;
 	// 法线应按缩放转置回到局部空间。正的非等比缩放也不会把点击的面识别成另一轴。
@@ -641,7 +678,14 @@ bool UDreamRubiksCubeComponent::BeginDrag(AActor* Interactor, const FVector& Ray
 	GrabCoordinate = Corners[CornerIndex].Coordinate;
 	// 正好命中内部黑色面、模型倒置法线或面向内的碰撞时不开始抓取，避免转动不可见的错误层。
 	if (GrabCoordinate[GrabFaceAxis] * GrabFaceNormal[GrabFaceAxis] <= 0.0)
+	{
+		UE_LOG(LogDreamSpace, Verbose,
+			TEXT("二阶魔方 [%s] 拒绝抓取：命中面不是角块外侧。角块=%d 命中=%s 法线=%s 局部法线=%s 轴=%d 面符号=%d "
+				 "坐标=%s。"),
+			*GetName(), CornerIndex, *Hit.ImpactPoint.ToString(), *Hit.ImpactNormal.ToString(), *LocalNormal.ToString(),
+			GrabFaceAxis, GrabFaceNormal[GrabFaceAxis] > 0.0 ? 1 : -1, *GrabCoordinate.ToString());
 		return false;
+	}
 	bTurnIssuedForGesture = false;
 	AccumulatedDrag = FVector::ZeroVector;
 	return Super::BeginDrag(Interactor, RayOrigin, RayDirection);

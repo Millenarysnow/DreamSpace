@@ -12,7 +12,9 @@
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/SceneCapture2D.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "Interface_CollisionDataProviderCore.h"
 #include "Math/RotationMatrix.h"
 #include "Misc/AutomationTest.h"
 #include "UObject/UnrealType.h"
@@ -112,6 +114,41 @@ int32 CountMeshes(const AActor* Owner)
 	TArray<UStaticMeshComponent*> Meshes;
 	Owner->GetComponents(Meshes);
 	return Meshes.Num();
+}
+
+/**
+ * 从真实碰撞三角面的内部取抓取点，不假设导入模型的面中心一定是实心。
+ * 当前八角块带有镂空，正对组件原点的射线可能穿过孔洞；选外侧三角形重心既避开孔洞，
+ * 也避开两片共边的精度边界。这里只生成测试射线，仍由正式碰撞与 BeginDrag 判定命中。
+ */
+bool FindRubiksAuthoredFacePoint(UStaticMeshComponent* Mesh, int32 Axis, int32 Sign, FVector& OutPoint)
+{
+	FTriMeshCollisionData Collision;
+	if (!Mesh || !Mesh->GetStaticMesh() || !Mesh->GetStaticMesh()->GetPhysicsTriMeshData(&Collision, false))
+		return false;
+	const FTransform Relative = Mesh->GetRelativeTransform();
+	double BestPlane = -TNumericLimits<double>::Max();
+	double BestArea = 0.0;
+	for (const FTriIndices& Triangle : Collision.Indices)
+	{
+		const FVector A = Relative.TransformPosition(FVector(Collision.Vertices[Triangle.v0]));
+		const FVector B = Relative.TransformPosition(FVector(Collision.Vertices[Triangle.v1]));
+		const FVector C = Relative.TransformPosition(FVector(Collision.Vertices[Triangle.v2]));
+		// 与 UE 烘焙三角碰撞时的绕序一致，不能把渲染索引绕序直接当成碰撞外法线。
+		const FVector Normal = FVector::CrossProduct(B - A, C - A) * (Collision.bFlipNormals ? -1.0 : 1.0);
+		const double Area = Normal.Size();
+		if (Area <= UE_SMALL_NUMBER || Normal[Axis] * Sign / Area < 0.99)
+			continue;
+		const FVector Point = (A + B + C) / 3.0;
+		const double Plane = Point[Axis] * Sign;
+		if (Plane > BestPlane + 0.01 || (FMath::IsNearlyEqual(Plane, BestPlane, 0.01) && Area > BestArea))
+		{
+			BestPlane = Plane;
+			BestArea = Area;
+			OutPoint = Point;
+		}
+	}
+	return BestArea > 0.0;
 }
 } // namespace
 
@@ -493,6 +530,88 @@ bool FDreamRubiksControllerTest::RunTest(const FString& Parameters)
 	Scene.Cube->Deactivate();
 	Controller->UpdateActiveDrag();
 	TestFalse(TEXT("停用目标后控制器释放所有本次交互锁"),
+		Controller->IsDraggingInteraction() || Controller->IsMoveInputIgnored() || Controller->IsLookInputIgnored());
+
+	// 临时 BoxComponent 无法覆盖蓝图组件路径、导入网格碰撞和自定义中心。
+	// 加载项目实际使用的八角块蓝图，在游戏世界里验证同一份资产能走完整抓取与控制器分发路径。
+	UClass* AuthoredClass =
+		LoadClass<AActor>(nullptr, TEXT("/Game/DreamInteraction/BP/BP_DreamRubiksCube.BP_DreamRubiksCube_C"));
+	if (!TestNotNull(TEXT("可以加载自定义魔方蓝图"), AuthoredClass))
+		return false;
+	AActor* AuthoredActor =
+		Scene.World->SpawnActor<AActor>(AuthoredClass, FVector(400, 0, 100), FRotator::ZeroRotator, Spawn);
+	UDreamRubiksCubeComponent* AuthoredCube = AuthoredActor->FindComponentByClass<UDreamRubiksCubeComponent>();
+	if (!TestNotNull(TEXT("自定义蓝图保留魔方组件"), AuthoredCube))
+		return false;
+	AuthoredCube->Activate(true);
+	AuthoredCube->BeginPlay();
+	if (!TestTrue(TEXT("自定义蓝图中心与八角块顺序可初始化"), AuthoredCube->ResetCube()))
+		return false;
+	SetRubiksFloat(AuthoredCube, TEXT("TurnDuration"), 0.0f);
+	AuthoredActor->SetActorTransform(FTransform(FRotator(25, 40, 15), FVector(400, 0, 100), FVector(0.634634)));
+	const FTransform AuthoredRoot = AuthoredActor->GetActorTransform();
+	TArray<FTransform> AuthoredInitial;
+	for (int32 Index = 0; Index < 8; ++Index)
+		AuthoredInitial.Add(AuthoredCube->GetCornerComponent(Index)->GetRelativeTransform());
+	FVector AuthoredWorldEntry = FVector::ZeroVector;
+	for (int32 Index = 0; Index < 8; ++Index)
+	{
+		for (int32 Axis = 0; Axis < 3; ++Axis)
+		{
+			const int32 Sign = AuthoredCube->GetCornerCoordinate(Index)[Axis];
+			FVector FacePoint;
+			if (!TestTrue(TEXT("自定义角块的三个外侧面具有实际碰撞三角形"),
+					FindRubiksAuthoredFacePoint(
+						Cast<UStaticMeshComponent>(AuthoredCube->GetCornerComponent(Index)), Axis, Sign, FacePoint)))
+				return false;
+			if (Index == 3 && Axis == 0)
+				AuthoredWorldEntry = FacePoint;
+			FVector Offset = FVector::ZeroVector;
+			Offset[Axis] = Sign * 2000.0;
+			FVector LocalDirection = FVector::ZeroVector;
+			LocalDirection[Axis] = -Sign;
+			const FVector RayOrigin = AuthoredRoot.TransformPosition(FacePoint + Offset);
+			const FVector RayDirection = AuthoredRoot.TransformVector(LocalDirection).GetSafeNormal();
+			if (TestTrue(FString::Printf(TEXT("实际自定义角块[%d] 的外侧面[%d] 能被射线抓取"), Index, Axis),
+					AuthoredCube->BeginDrag(Scene.Interactor, RayOrigin, RayDirection)))
+			{
+				FVector Tangent = FVector::ZeroVector;
+				Tangent[(Axis + 1) % 3] = 20.0;
+				AuthoredCube->UpdateDrag(
+					RayOrigin + AuthoredRoot.TransformVector(Tangent), RayDirection, FVector2D(20, 0));
+				AuthoredCube->EndDrag();
+				TestEqual(TEXT("真实自定义网格抓取后拖动提交一层"), AuthoredCube->GetMoveCount(), 1);
+				TestTrue(TEXT("自定义模型拖动也可以撤销"), AuthoredCube->UndoLastMove(false));
+				for (int32 Corner = 0; Corner < 8; ++Corner)
+					TestTrue(TEXT("自定义中心转动撤销恢复所有模型完整姿态"),
+						AuthoredCube->GetCornerComponent(Corner)->GetRelativeTransform().Equals(
+							AuthoredInitial[Corner], 0.001f));
+			}
+			AuthoredCube->EndDrag();
+			AuthoredCube->ResetCube();
+		}
+	}
+	// 原测试模型移远，确保以下世界拾取检测的是实际自定义网格。
+	Scene.Owner->SetActorLocation(FVector(-50000, 0, 0));
+	Controller->bMiniatureInteractionMode = false;
+	View.Location = AuthoredRoot.TransformPosition(AuthoredWorldEntry + FVector(-400, 0, 0));
+	View.Rotation = AuthoredRoot.Rotator();
+	Controller->PlayerCameraManager->SetCameraCachePOV(View);
+	Controller->Interact();
+	TestTrue(TEXT("普通 E 可以经真实首个命中进入自定义魔方拖动"), Controller->IsDraggingInteraction());
+	AuthoredCube->UpdateDrag(
+		View.Location + AuthoredRoot.TransformVector(FVector(0, 20, 0)), View.Rotation.Vector(), FVector2D(20, 0));
+	TestEqual(TEXT("普通 E 对自定义模型实际提交转动"), AuthoredCube->GetMoveCount(), 1);
+	Controller->EndWorldDrag();
+	AuthoredCube->ResetCube();
+	// 手办仍使用上一段真实显示面；只把捕获相机朝向自定义角块，覆盖完整的映射拾取。
+	const FVector CaptureLocal = AuthoredWorldEntry + FVector(-2000, 0, 0);
+	Capture->SetActorLocationAndRotation(AuthoredRoot.TransformPosition(CaptureLocal), AuthoredRoot.Rotator());
+	Controller->bMiniatureInteractionMode = true;
+	Controller->InteractWithMiniatureRay(Camera, Display->GetComponentLocation() - Camera);
+	TestTrue(TEXT("手办映射后的首个命中进入自定义魔方拖动"), Controller->IsDraggingInteraction());
+	Controller->EndMiniatureDrag();
+	TestFalse(TEXT("自定义蓝图结束交互后也正确释放输入锁"),
 		Controller->IsDraggingInteraction() || Controller->IsMoveInputIgnored() || Controller->IsLookInputIgnored());
 	return true;
 }
