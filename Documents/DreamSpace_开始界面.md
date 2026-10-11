@@ -2,6 +2,8 @@
 
 打开 `/Game/DreamPresentation/MainMenu/Maps/L_DreamMainMenu` 并运行即可查看。游戏默认启动地图和编辑器启动地图都已设为此关卡。左侧为保留原造型的石墨灰 Logo，右侧建筑以 **2°/秒**缓慢自转，背景为用户提供的浅皱 A4 纸。没有按钮或开始提示文字；点击画面任意位置，整幅画面在 0.65 秒内淡出，然后进入 `/Game/0_/Maps/TEST`。Enter、空格、触摸和手柄底部确认键也可开始，Esc、滚轮和鼠标移动不会误触。
 
+菜单与 TEST 现在分别播放循环 BGM，确认开始时菜单音乐随画面淡出，同时播放跨关卡保留的“请进入游戏”音效。资源、音量配置和实机验证见 [BGM 与开始音效](DreamSpace_BGM与开始音效.md)。
+
 ![UE 实际运行画面](Images/DreamMainMenu.png)
 
 ## 结构与资源

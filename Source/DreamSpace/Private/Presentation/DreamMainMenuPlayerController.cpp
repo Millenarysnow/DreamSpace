@@ -1,7 +1,9 @@
 #include "DreamMainMenuPlayerController.h"
 
 #include "DreamMainMenuScene.h"
+#include "DreamAudioSubsystem.h"
 #include "DreamSpace.h"
+#include "Engine/GameInstance.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/Texture2D.h"
@@ -188,6 +190,14 @@ void ADreamMainMenuPlayerController::RequestStartGame()
 	TransitionStartOpacity = GetPaperFadeOpacity();
 	bStartingGame = true;
 	TransitionTime = 0.0f;
+	// 先让菜单音乐平滑退出，再播放一次跨地图保留的确认音效；地图加载期间不会截断这一下提示音。
+	if (UGameInstance* GameInstance = GetGameInstance())
+	{
+		if (UDreamAudioSubsystem* Audio = GameInstance->GetSubsystem<UDreamAudioSubsystem>())
+		{
+			Audio->BeginMenuTransition(GetWorld(), FadeOutDuration);
+		}
+	}
 	UE_LOG(LogDreamSpace, Log, TEXT("[开始界面] 确认开始，淡出后打开 %s"), *Package);
 }
 

@@ -1,0 +1,29 @@
+{
+  "source_directory": "_assets/bgm",
+  "audio": [
+    {
+      "asset": "/Game/Audio/BGM/SW_MenuMusic",
+      "source_filename": "1 梦境核心音效_胡安霍制作的音效_(1 Dreamcore_爱给网_aigei_com.mp3",
+      "project_source": "RawContent/Audio/SW_MenuMusic.mp3",
+      "sha256": "3ccaec1ebe9124e789d7511e2b81451d9cd7c480d61c17838b42afb537ee7ad0",
+      "bytes": 2448240,
+      "looping": true
+    },
+    {
+      "asset": "/Game/Audio/BGM/SW_GameplayMusic",
+      "source_filename": "午后回声  梦核情绪_爱给网_aigei_com.mp3",
+      "project_source": "RawContent/Audio/SW_GameplayMusic.mp3",
+      "sha256": "d323568eff41acba073b7db8e458483f728378217e63186ed08f0e09bee259c6",
+      "bytes": 571824,
+      "looping": true
+    },
+    {
+      "asset": "/Game/Audio/BGM/SW_EnterGame",
+      "source_filename": "请进入游戏(se_enter_game)_爱给网_aigei_com.mp3",
+      "project_source": "RawContent/Audio/SW_EnterGame.mp3",
+      "sha256": "2755dde615c7e195c25436fbb4677bde1d523a0f4293b505ef542bf49b19bb29",
+      "bytes": 20302,
+      "looping": false
+    }
+  ]
+}
