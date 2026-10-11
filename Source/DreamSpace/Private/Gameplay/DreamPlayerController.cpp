@@ -249,21 +249,6 @@ void ADreamPlayerController::Interact()
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
 		Hit, Origin, TraceEnd, InteractTraceChannel, Params);
 
-	// 每次按 E 都把本次实际射线短暂留在世界中：绿色表示命中，红色表示未命中。
-	// 使用有限显示时长，既能在按键后观察射线，也不会让旧调试线永久堆积在场景里。
-	const FColor TraceColor = bHit ? FColor::Green : FColor::Red;
-	DrawDebugLine(GetWorld(), Origin, bHit ? Hit.ImpactPoint : TraceEnd, TraceColor,
-		false, 2.5f, 0, 2.0f);
-	if (bHit)
-	{
-		// 球标记真实碰撞点，法线箭头显示命中表面的朝向，方便判断射线是否打在预期碰撞体上。
-		DrawDebugSphere(GetWorld(), Hit.ImpactPoint, 8.0f, 12, FColor::Yellow,
-			false, 2.5f, 0, 2.0f);
-		DrawDebugDirectionalArrow(GetWorld(), Hit.ImpactPoint,
-			Hit.ImpactPoint + Hit.ImpactNormal * 35.0f, 8.0f, FColor::Cyan,
-			false, 2.5f, 0, 1.5f);
-	}
-
 	if (!bHit)
 	{
 		UE_LOG(LogDreamSpace, Verbose,
