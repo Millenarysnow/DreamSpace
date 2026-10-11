@@ -33,7 +33,45 @@ PARAMETERS.update({
     "EffectStrength": (0.0, "默认关闭；本地玩家相机管理器有有效 Pawn 时设置为 1，防止编辑器被染成线稿。"),
     "InkDarkness": (0.006, "轮廓目标显示灰阶；0 为黑色，1 为白色。"),
     "SketchDebugView": (0.0, "0 正式效果，1 外圈明暗，2 距离遮罩，3 原始场景。"),
+    "ThinGeometryStrength": (0.85, "先检测真实 GBuffer texel 再插值覆盖率，补回细栏杆 / 浅浮雕；0 关闭补线。"),
+    "DetailStrength": (0.8, "将 TSR 输出中的文字和细线转成灰阶墨线；0 关闭颜色细节补线。"),
+    "DetailThreshold": (0.12, "输出像素二阶色彩对比阈值；提高减少贴图噪声，降低保留更浅的字笔画。"),
 })
+
+
+def shader_source(name):
+    """共享遮罩在生成时展开；打包资源内含完整代码，运行时不读取外部 HLSL。
+
+    两阶段使用同一源文件，后续修改距离、透明手办或 UV 规则时不会出现
+    主通道已修复而平滑通道仍用旧公式的情况。检查唯一占位符以防静默漏嵌入。
+    """
+    source = (SCRIPT_DIR / name).read_text(encoding="utf-8")
+    marker = "// PROXIMITY_DISTANCE_MASK"
+    util.require(source.count(marker) == 1, "距离遮罩占位符缺失或重复：" + name)
+    return source.replace(marker, (SCRIPT_DIR / "ProximitySketchMask.hlsl").read_text(encoding="utf-8"))
+
+
+def connect_inputs(custom, sources):
+    """按名字复用 Custom 输入及已有连接，增量更新时不清空整个输入数组。
+
+    原来重新创建每个 CustomInput 会先断开 SceneColor 等连接，引发一轮临时
+    的 missing input / 默认材质警告。保留已有结构体中的 ExpressionInput，
+    只在输入名单变化时替换数组，再明确连接所有来源，最终图仍由编译器验证。
+    """
+    previous = list(custom.get_editor_property("inputs"))
+    by_name = {str(entry.get_editor_property("input_name")): entry for entry in previous}
+    inputs = []
+    for name in sources:
+        entry = by_name.get(name)
+        if entry is None:
+            entry = unreal.CustomInput()
+            entry.set_editor_property("input_name", name)
+        inputs.append(entry)
+    if list(by_name) != list(sources):
+        custom.set_editor_property("inputs", inputs)
+    for name, node in sources.items():
+        util.require(unreal.MaterialEditingLibrary.connect_material_expressions(node, "", custom, name),
+                     "Custom 输入连接失败：" + name)
 
 
 def create_smoothing():
@@ -53,7 +91,7 @@ def create_smoothing():
     material.set_editor_property("blendable_priority", 10)
     custom = obtain(unreal.MaterialExpressionCustom, 0, 0, "只在玩家范围外对石墨细线做方向平滑")
     custom.set_editor_property("description", "距离线稿局部平滑")
-    prefix = (SCRIPT_DIR / "ProximitySketchAA.hlsl").read_text(encoding="utf-8")
+    prefix = shader_source("ProximitySketchAA.hlsl")
     smoothing = (SCRIPT_DIR.parent / "WhitePreview/WhiteOutlineAA.hlsl").read_text(encoding="utf-8")
     util.require(smoothing.count("return smoothed;") == 1, "预览平滑出口改变，请同步游戏生成器")
     smoothing = smoothing.replace("return smoothed;", "return lerp(SceneColor.rgb, smoothed, sketchWeight);")
@@ -80,14 +118,7 @@ def create_smoothing():
     position.set_editor_property("parameter_name", "PlayerPosition")
     position.set_editor_property("default_value", unreal.LinearColor(0, 0, 0, 0))
     sources["PlayerPosition"] = position
-    inputs = []
-    for name in sources:
-        entry = unreal.CustomInput()
-        entry.set_editor_property("input_name", name)
-        inputs.append(entry)
-    custom.set_editor_property("inputs", inputs)
-    for name, node in sources.items():
-        util.require(unreal.MaterialEditingLibrary.connect_material_expressions(node, "", custom, name), "平滑输入连接失败：" + name)
+    connect_inputs(custom, sources)
     util.connect_output(custom, unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     util.compile_and_save(material)
     instance = util.asset_of_type("MI_ProximitySketchAA", MATERIALS, unreal.MaterialInstanceConstant,
@@ -137,7 +168,7 @@ def main():
     custom = node_for(unreal.MaterialExpressionCustom, 0, 0,
                              "原始场景曝光与 TSR 完成后，按玩家世界距离合成手绘排线")
     custom.set_editor_property("description", "玩家距离手绘线稿")
-    custom.set_editor_property("code", (SCRIPT_DIR / "ProximitySketch.hlsl").read_text(encoding="utf-8"))
+    custom.set_editor_property("code", shader_source("ProximitySketch.hlsl"))
     custom.set_editor_property("output_type", unreal.CustomMaterialOutputType.CMOT_FLOAT3)
     sources = {}
     for index, (name, texture) in enumerate([
@@ -175,14 +206,7 @@ def main():
         node.set_editor_property("default_value", value)
         node.set_editor_property("group", "运行时位置与方向")
         sources[name] = node
-    inputs = []
-    for name in sources:
-        entry = unreal.CustomInput()
-        entry.set_editor_property("input_name", name)
-        inputs.append(entry)
-    custom.set_editor_property("inputs", inputs)
-    for name, node in sources.items():
-        util.require(unreal.MaterialEditingLibrary.connect_material_expressions(node, "", custom, name), "连接失败：" + name)
+    connect_inputs(custom, sources)
     util.connect_output(custom, unreal.MaterialProperty.MP_EMISSIVE_COLOR)
     util.compile_and_save(material)
     instance = util.asset_of_type("MI_ProximitySketch", MATERIALS, unreal.MaterialInstanceConstant,
