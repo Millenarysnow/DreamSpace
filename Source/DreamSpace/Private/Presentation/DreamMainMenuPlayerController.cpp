@@ -2,6 +2,7 @@
 
 #include "DreamMainMenuScene.h"
 #include "DreamAudioSubsystem.h"
+#include "DreamMenuTransitionSubsystem.h"
 #include "DreamSpace.h"
 #include "Engine/GameInstance.h"
 #include "Engine/GameViewportClient.h"
@@ -42,6 +43,8 @@ public:
 
 	virtual bool SupportsKeyboardFocus() const override { return true; }
 	virtual FVector2D ComputeDesiredSize(float) const override { return FVector2D::ZeroVector; }
+	/** Logo 与初始纸白遮罩按控制器时间变化，不能被 Slate 的绘制缓存冻结。 */
+	virtual bool ComputeVolatility() const override { return true; }
 
 	virtual FReply OnMouseButtonDown(const FGeometry&, const FPointerEvent& Event) override
 	{
@@ -77,9 +80,10 @@ public:
 			const FVector2D LogoSize = FVector2D(LogoBrush.ImageSize) * Scale;
 			const FVector2D Position = Layout.LogoCenter * Size - LogoSize * 0.5;
 			FSlateDrawElement::MakeBox(Elements, Layer, Geometry.ToPaintGeometry(LogoSize,
-				FSlateLayoutTransform(Position)), &LogoBrush, ESlateDrawEffect::None, FLinearColor::White);
+				FSlateLayoutTransform(Position)), &LogoBrush, ESlateDrawEffect::None,
+				FLinearColor(1.0f, 1.0f, 1.0f, Controller->GetLogoOpacity()));
 		}
-		// 遮罩画在 Logo 上方，因此淡出包含建筑、纸纹与 Logo；不会出现标题悬在白屏上的一帧。
+		// 这层纸白仅用于初次进入菜单的淡入，点击后继续退去，天台推进期间场景始终可见。
 		const float Opacity = Controller->GetPaperFadeOpacity();
 		if (Opacity > 0.0f)
 			FSlateDrawElement::MakeBox(Elements, Layer + 1, Geometry.ToPaintGeometry(),
@@ -169,11 +173,18 @@ float ADreamMainMenuPlayerController::GetPaperFadeOpacity() const
 	const auto Smooth = [](float Value) { return Value * Value * (3.0f - 2.0f * Value); };
 	if (bStartingGame)
 	{
-		const float Progress = FadeOutDuration > 0.0f ? FMath::Clamp(TransitionTime / FadeOutDuration, 0.0f, 1.0f) : 1.0f;
-		return FMath::Lerp(TransitionStartOpacity, 1.0f, Smooth(Progress));
+		// 即使在初始纸白淡入期间点击，也继续显出建筑；飞入全过程保持场景可见。
+		const float Progress = FadeInDuration > 0.0f ? FMath::Clamp(TransitionTime / FadeInDuration, 0.0f, 1.0f) : 1.0f;
+		return TransitionStartOpacity * (1.0f - Smooth(Progress));
 	}
 	const float Progress = FadeInDuration > 0.0f ? FMath::Clamp(VisibleTime / FadeInDuration, 0.0f, 1.0f) : 1.0f;
 	return 1.0f - Smooth(Progress);
+}
+
+float ADreamMainMenuPlayerController::GetLogoOpacity() const
+{
+	return bStartingGame ? 1.0f - UDreamMenuTransitionSubsystem::Ease(
+		FadeOutDuration > 0.0f ? TransitionTime / FadeOutDuration : 1.0f) : 1.0f;
 }
 
 void ADreamMainMenuPlayerController::RequestStartGame()
@@ -190,15 +201,18 @@ void ADreamMainMenuPlayerController::RequestStartGame()
 	TransitionStartOpacity = GetPaperFadeOpacity();
 	bStartingGame = true;
 	TransitionTime = 0.0f;
+	if (MenuScene.IsValid())
+		MenuScene->BeginRooftopApproach(RooftopApproachDuration);
+	bShowMouseCursor = false;
 	// 先让菜单音乐平滑退出，再播放一次跨地图保留的确认音效；地图加载期间不会截断这一下提示音。
 	if (UGameInstance* GameInstance = GetGameInstance())
 	{
 		if (UDreamAudioSubsystem* Audio = GameInstance->GetSubsystem<UDreamAudioSubsystem>())
 		{
-			Audio->BeginMenuTransition(GetWorld(), FadeOutDuration);
+			Audio->BeginMenuTransition(GetWorld(), RooftopApproachDuration);
 		}
 	}
-	UE_LOG(LogDreamSpace, Log, TEXT("[开始界面] 确认开始，淡出后打开 %s"), *Package);
+	UE_LOG(LogDreamSpace, Log, TEXT("[开始界面] 确认开始，镜头聚焦天台后接续 %s"), *Package);
 }
 
 void ADreamMainMenuPlayerController::PlayerTick(float DeltaTime)
@@ -209,9 +223,24 @@ void ADreamMainMenuPlayerController::PlayerTick(float DeltaTime)
 	if (!bStartingGame || bTravelRequested)
 		return;
 	TransitionTime += DeltaTime;
-	// 留一帧完整遮罩再发出跳转，避免同步加载前最后一帧还残留建筑轮廓。
-	if (TransitionTime > FadeOutDuration + 0.05f)
+	if (MenuScene.IsValid())
+		MenuScene->AdvanceRooftopApproach(TransitionTime);
+	// 终点停稳后请求读屏，子系统在真正绘制完成时采集。等待帧就绪而非只等固定时间，
+	// 低帧率 / 首次加载卡顿也不会把控制器刚写入、GPU 尚未绘制的视点当作末帧。
+	if (TransitionTime > RooftopApproachDuration + 0.05f && !bTravelPrepared)
 	{
+		if (UDreamMenuTransitionSubsystem* Transition = GetGameInstance()->GetSubsystem<UDreamMenuTransitionSubsystem>())
+			if (MenuScene.IsValid())
+				Transition->PrepareTravel(this, GameplayMap.ToSoftObjectPath().GetLongPackageName(),
+					MenuScene->GetGameplayEntryView(), PlayerLandingDuration, SceneFrameBlendDuration);
+		bTravelPrepared = true;
+		return;
+	}
+	if (bTravelPrepared)
+	{
+		UDreamMenuTransitionSubsystem* Transition = GetGameInstance()->GetSubsystem<UDreamMenuTransitionSubsystem>();
+		if (Transition && !Transition->ActivateTravelFrame())
+			return;
 		bTravelRequested = true;
 		bShowMouseCursor = false;
 		SetInputMode(FInputModeGameOnly());

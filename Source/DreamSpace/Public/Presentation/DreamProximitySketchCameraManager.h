@@ -77,6 +77,8 @@ public:
 	UMaterialInstanceDynamic* GetSketchMaterialInstance() const { return SketchInstance; }
 
 protected:
+	/** 先读取真实越肩相机，再覆盖本次入场的镜头姿态；结束帧直接返回原始 POV。 */
+	virtual void UpdateViewTargetInternal(FTViewTarget& OutVT, float DeltaTime) override;
 	virtual void ApplyCameraModifiers(float DeltaTime, FMinimalViewInfo& InOutPOV) override;
 	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
@@ -95,6 +97,14 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UMaterialInstanceDynamic> SmoothingInstance;
+
+	/** 菜单纸纹只在从菜单进入时出现；使用瞬时 MID 渐变，不修改磁盘上的纸张实例。 */
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> ArrivalPaperMaterial;
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialInstanceDynamic> ArrivalPaperInstance;
+	UPROPERTY(Transient)
+	FPostProcessSettings ArrivalPaperSettings;
 
 	/** 只包含本效果的 blendable；没有曝光、调色、景深等额外覆盖项。 */
 	UPROPERTY(Transient)

@@ -9,6 +9,8 @@
 #include "DreamPasswordChest.h"
 #include "DreamSpace.h"
 #include "DreamProximitySketchCameraManager.h"
+#include "DreamMenuTransitionSubsystem.h"
+#include "Engine/GameInstance.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputMappingContext.h"
@@ -78,6 +80,9 @@ void ADreamPlayerController::ReceivedPlayer()
 
 void ADreamPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
+	// 停止 PIE、离开 TEST 或销毁控制器时，不让 GameInstance 的持久快照覆盖后续视口。
+	if (IsMenuArrivalActive())
+		GetGameInstance()->GetSubsystem<UDreamMenuTransitionSubsystem>()->CompleteArrival();
 	ClosePasswordEntry();
 	EndActiveDrag();
 	if (bMiniatureInteractionMode)
@@ -161,7 +166,9 @@ void ADreamPlayerController::SetupInputComponent()
 
 void ADreamPlayerController::ApplyInputMapping()
 {
-	if (!IsLocalController() || !GetLocalPlayer())
+	// 进入 TEST 的第一帧就能读取 GameInstance 中的接力请求，映射晚于相机接管安装。
+	// 不移除其他系统的映射，也不清空 IgnoreInput 计数，避免与密码箱 / 手办的锁互相干扰。
+	if (!IsLocalController() || !GetLocalPlayer() || IsMenuArrivalActive())
 		return;
 
 	if (UEnhancedInputLocalPlayerSubsystem* Input =
@@ -191,11 +198,18 @@ void ADreamPlayerController::ApplyInputMapping()
 	}
 }
 
+bool ADreamPlayerController::IsMenuArrivalActive() const
+{
+	const UGameInstance* Instance = GetGameInstance();
+	const UDreamMenuTransitionSubsystem* Transition = Instance ? Instance->GetSubsystem<UDreamMenuTransitionSubsystem>() : nullptr;
+	return Transition && Transition->IsArrivalForWorld(GetWorld());
+}
+
 void ADreamPlayerController::UpdateRotation(float Delta)
 {
 	// 平台可能在本帧主动旋转玩家重力和视角；拖动期间保留该完整姿态，
 	// 不再用鼠标或重力相对欧拉角覆盖它，以免拖动射线和手办画面来回偏移。
-	if (bMiniatureInteractionMode || IsDraggingInteraction() || IsEnteringPassword())
+	if (IsMenuArrivalActive() || bMiniatureInteractionMode || IsDraggingInteraction() || IsEnteringPassword())
 		return;
 	// 在自定义重力场景中，把控制旋转转换到重力相对空间再叠加输入，保证相机姿态始终贴合当前重力方向。
 	auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
@@ -689,6 +703,11 @@ void ADreamPlayerController::BeginActiveDrag(
 void ADreamPlayerController::PlayerTick(float DeltaTime)
 {
 	Super::PlayerTick(DeltaTime);
+	if (IsMenuArrivalActive())
+		return;
+	// 天台过渡结束后的下一帧恢复正常映射；常规游玩中安装函数仍是幂等的。
+	if (!bDefaultMappingsApplied || !bMappingApplied)
+		ApplyInputMapping();
 	UpdatePasswordEntry();
 	// 停用显示、销毁角色或外部切换 ViewTarget 都不能留下 Tab 输入锁。
 	// 通过当前会话的弱引用检查旧对象，避免新 Pawn 意外继承上一位角色的观察状态。
@@ -858,6 +877,9 @@ void ADreamPlayerController::EndActiveDrag(bool bTryCommitMiniatureExtract)
 
 void ADreamPlayerController::OnUnPossess()
 {
+	// 失去 Pawn 后不会再推进入场相机；显式取消接力，避免输入与 HUD 永久等待终点。
+	if (IsMenuArrivalActive())
+		GetGameInstance()->GetSubsystem<UDreamMenuTransitionSubsystem>()->CompleteArrival();
 	ClosePasswordEntry();
 	if (bMiniatureInteractionMode)
 		SetMiniatureInteractionMode(false, false);
