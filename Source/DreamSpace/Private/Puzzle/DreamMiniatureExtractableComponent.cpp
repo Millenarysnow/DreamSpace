@@ -5,6 +5,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/World.h"
+#include "PhysicsEngine/BodyInstance.h"
 
 UDreamMiniatureExtractableComponent::UDreamMiniatureExtractableComponent()
 {
@@ -58,6 +59,56 @@ void UDreamMiniatureExtractableComponent::OnInteracted_Implementation(AActor* In
 	UE_LOG(LogDreamSpace, Verbose, TEXT("%s 只能在手办模式按住左键拖出。"), *GetNameSafe(GetOwner()));
 }
 
+bool UDreamMiniatureExtractableComponent::CanExtractAtCurrentLocation() const
+{
+	AActor* Owner = GetOwner();
+	if (!IsActive() || bExtracting || bExtracted || !IsValid(Owner) || !GetWorld() || Owner->IsHidden())
+		return false;
+
+	// FComponentReference 留空也能解析为自身根组件，必须先区分“没有限制”和“明确填写过引用”。
+	// IsExplicitlyNull 同时保留失效弱引用的身份：范围 Actor 被销毁后不能误当成留空而开放取出。
+	const bool bHasOverlapCondition = !ExtractionOverlapComponent.ComponentProperty.IsNone() ||
+		!ExtractionOverlapComponent.PathToComponent.IsEmpty() ||
+		!ExtractionOverlapComponent.OverrideComponent.IsExplicitlyNull() ||
+		!ExtractionOverlapComponent.OtherActor.IsExplicitlyNull();
+	if (!bHasOverlapCondition)
+		return true;
+	if ((!ExtractionOverlapComponent.OtherActor.IsExplicitlyNull() &&
+		!ExtractionOverlapComponent.OtherActor.IsValid()) ||
+		(!ExtractionOverlapComponent.OverrideComponent.IsExplicitlyNull() &&
+		!ExtractionOverlapComponent.OverrideComponent.IsValid()))
+		return false;
+
+	UPrimitiveComponent* OverlapComponent =
+		Cast<UPrimitiveComponent>(ExtractionOverlapComponent.GetComponent(Owner));
+	if (!IsValid(OverlapComponent) || !OverlapComponent->IsRegistered() ||
+		OverlapComponent->GetWorld() != GetWorld() || !OverlapComponent->IsQueryCollisionEnabled() ||
+		!Owner->GetActorEnableCollision())
+		return false;
+	const FBodyInstance* RangeBody = OverlapComponent->GetBodyInstance();
+	if (!RangeBody || !RangeBody->IsValidBodyInstance())
+		return false;
+
+	// 检查所属 Actor 的全部有效简单碰撞，而非 Actor 原点或世界 AABB。
+	// 即使无碰撞 SceneComponent 做根，附属网格/碰撞盒也能满足条件；旋转过的盒体不会产生 AABB 误判。
+	TInlineComponentArray<UPrimitiveComponent*> OwnerPrimitives(Owner);
+	const FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(DreamMiniatureExtractionRange), false);
+	for (UPrimitiveComponent* Primitive : OwnerPrimitives)
+	{
+		if (!IsValid(Primitive) || Primitive == OverlapComponent || !Primitive->IsRegistered() ||
+			!Primitive->IsQueryCollisionEnabled())
+			continue;
+		const FBodyInstance* Body = Primitive->GetBodyInstance();
+		if (!Body || !Body->IsValidBodyInstance())
+			continue;
+		// 直接比较两个物理形状，不读取可能因 Overlap 事件关闭或本帧拖动而尚未更新的重叠缓存。
+		if (OverlapComponent->ComponentOverlapComponent(
+			Primitive, Primitive->GetComponentLocation(), Primitive->GetComponentQuat(), QueryParams))
+			return true;
+	}
+	return false;
+}
+
 UStaticMeshComponent* UDreamMiniatureExtractableComponent::ResolveSourceMesh(UPrimitiveComponent* HitComponent) const
 {
 	AActor* Owner = GetOwner();
@@ -81,7 +132,8 @@ UStaticMeshComponent* UDreamMiniatureExtractableComponent::ResolveSourceMesh(UPr
 bool UDreamMiniatureExtractableComponent::BeginExtract(AActor* Interactor, UPrimitiveComponent* HitComponent,
 	const FVector& InitialDisplayPoint, const FVector& DisplayFrontNormal)
 {
-	if (bExtracting || bExtracted)
+	// 与控制器共用同一前置条件；拒绝时还未生成预览、隐藏模型或修改任何碰撞状态。
+	if (!CanExtractAtCurrentLocation())
 		return false;
 	AActor* Owner = GetOwner();
 	UStaticMeshComponent* Source = ResolveSourceMesh(HitComponent);

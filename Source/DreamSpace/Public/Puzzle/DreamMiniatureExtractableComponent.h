@@ -33,6 +33,14 @@ public:
 		float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void OnInteracted_Implementation(AActor* Interactor) override;
 
+	/**
+	 * 查询当前是否可以选择“手办取出”行为：可选碰撞体留空时不限制位置，填写后必须与其实际重叠。
+	 * 控制器在左键按下时用它选择取出或自由拖动；BeginExtract 也会检查，蓝图不能绕过位置条件。
+	 * 开始后不再检查：预览会关闭源 Actor 的碰撞，且一次按住期间不能突然切换成另一种交互。
+	 */
+	UFUNCTION(BlueprintPure, Category = "手办取出")
+	bool CanExtractAtCurrentLocation() const;
+
 	/** 从已经命中的房间模型开始；InitialDisplayPoint 是鼠标在手办显示面上的世界交点。 */
 	UFUNCTION(BlueprintCallable, Category = "手办取出")
 	bool BeginExtract(AActor* Interactor, UPrimitiveComponent* HitComponent, const FVector& InitialDisplayPoint,
@@ -59,6 +67,18 @@ public:
 	ADreamDroppedItem* GetPreviewItem() const { return PreviewItem.Get(); }
 
 private:
+	/**
+	 * 可选的取出许可范围，使用真实组件引用，可在关卡实例中选择其它 Actor 的 Box/Sphere 等碰撞体。
+	 * 留空保留原有随处取出行为；填写后，所属 Actor 至少一个查询碰撞组件必须与该碰撞体重叠。
+	 * 使用即时形状查询，不依赖 Generate Overlap Events 或双方的 Overlap 响应；双方须开启 Query，
+	 * 且具有有效的简单碰撞。指定引用失效、范围停用或没有实际重叠时，只允许现有自由拖动接管。
+	 * 同一 Actor 的范围组件也能选择，但它自身不会作为重叠证据，避免“与自己重叠”恒为真。
+	 */
+	UPROPERTY(EditAnywhere, Category = "手办取出|条件",
+		meta = (UseComponentPicker = true, AllowAnyActor = true,
+			AllowedClasses = "/Script/Engine.PrimitiveComponent", DisplayName = "允许取出的重叠碰撞体（可选）"))
+	FComponentReference ExtractionOverlapComponent;
+
 	/** 优先使用指定网格；留空时使用点击命中的静态网格，否则取所属 Actor 的第一个静态网格。 */
 	UPROPERTY(EditAnywhere, Category = "手办取出|模型",
 		meta = (UseComponentPicker = true, AllowedClasses = "/Script/Engine.StaticMeshComponent",

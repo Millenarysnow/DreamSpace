@@ -4,6 +4,7 @@
 #include "DreamCharacter.h"
 #include "DreamDroppedItem.h"
 #include "DreamDraggableComponent.h"
+#include "DreamPivotPointComponent.h"
 #include "DreamPlayerController.h"
 #include "DreamSceneCaptureAnchor.h"
 #include "DreamSceneCapturePresentationComponent.h"
@@ -28,6 +29,37 @@ void SetExtractionBool(UObject* Object, const TCHAR* Name, bool Value)
 	FBoolProperty* Property = FindFProperty<FBoolProperty>(Object->GetClass(), Name);
 	check(Property);
 	Property->SetPropertyValue_InContainer(Object, Value);
+}
+
+/** 模拟详情面板选中外部碰撞组件，保留 Actor 与组件路径以验证真实解析及引用失效行为。 */
+void SetExtractionRange(UDreamMiniatureExtractableComponent* Extract, UPrimitiveComponent* Range)
+{
+	FStructProperty* Property = FindFProperty<FStructProperty>(Extract->GetClass(), TEXT("ExtractionOverlapComponent"));
+	check(Property);
+	FComponentReference* Reference = Property->ContainerPtrToValuePtr<FComponentReference>(Extract);
+	*Reference = FComponentReference();
+	if (Range)
+	{
+		Reference->OtherActor = Range->GetOwner();
+		Reference->PathToComponent = Range->GetPathName(Range->GetOwner());
+	}
+}
+
+/** 许可范围独立于运动机关，忽略全部通道、关闭 Overlap 事件，避免它遮挡实际捕获拾取射线。 */
+UBoxComponent* AddExtractionRange(UWorld* World, const FVector& Location, const FVector& Extent)
+{
+	AActor* RangeActor = World->SpawnActor<AActor>();
+	UBoxComponent* Box = NewObject<UBoxComponent>(RangeActor);
+	Box->SetMobility(EComponentMobility::Movable);
+	Box->SetBoxExtent(Extent);
+	Box->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Box->SetCollisionResponseToAllChannels(ECR_Ignore);
+	Box->SetGenerateOverlapEvents(false);
+	RangeActor->SetRootComponent(Box);
+	RangeActor->AddInstanceComponent(Box);
+	Box->RegisterComponent();
+	RangeActor->SetActorLocation(Location);
+	return Box;
 }
 
 template <typename T> T* AddExtractionTestComponent(AActor* Actor)
@@ -80,6 +112,67 @@ struct FExtractionFixture
 	}
 };
 } // namespace
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureExtractionRangeTest,
+	"DreamSpace.Puzzle.Extraction.OptionalRangeUsesActualCollisionAndRejectsInvalidReference",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FDreamMiniatureExtractionRangeTest::RunTest(const FString& Parameters)
+{
+	FExtractionFixture Scene;
+	TestTrue(TEXT("范围留空时保留原有取出行为"), Scene.Begin());
+	Scene.Extract->EndExtract(false);
+	Scene.Mesh->SetGenerateOverlapEvents(false);
+	UBoxComponent* Range = AddExtractionRange(Scene.World, Scene.Source->GetActorLocation() + FVector(200, 0, 0), FVector(20));
+	SetExtractionRange(Scene.Extract, Range);
+	const FTransform Start = Scene.Source->GetActorTransform();
+	TestFalse(TEXT("填写范围但未重叠不能通过蓝图直接开始取出"), Scene.Begin());
+	TestTrue(TEXT("拒绝取出不改变源模型或生成预览"), !Scene.Source->IsHidden() &&
+		Scene.Source->GetActorEnableCollision() && !Scene.Extract->GetPreviewItem() &&
+		Scene.Source->GetActorTransform().Equals(Start));
+
+	// Actor 原点仍在范围外，只让立方体的边缘进入范围，证明检查的是实际碰撞而不是中心点。
+	Range->GetOwner()->SetActorLocation(Start.GetLocation() + FVector(60, 0, 0));
+	TestTrue(TEXT("边缘相交、双方忽略碰撞响应且关闭重叠事件时也允许取出"), Scene.Begin());
+	Scene.Extract->TickComponent(0.016f, LEVELTICK_All, nullptr);
+	TestTrue(TEXT("取出关闭源 Actor 碰撞后不误取消已开始的会话"), Scene.Extract->IsExtracting());
+	Scene.Extract->EndExtract(false);
+	Range->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	TestFalse(TEXT("停用许可范围的 Query 碰撞后拒绝取出"), Scene.Begin());
+	Range->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+
+	// 细长盒旋转 45 度，源立方体落在其 AABB 角落但不与盒体本身相交，排除包围盒误判。
+	Scene.Mesh->SetWorldScale3D(FVector(0.1));
+	Range->SetBoxExtent(FVector(100, 5, 20));
+	Range->GetOwner()->SetActorLocationAndRotation(Start.GetLocation(), FRotator(0, 45, 0));
+	Scene.Source->SetActorLocation(Start.GetLocation() + FVector(60, -60, 0));
+	TestTrue(TEXT("几何回归场景的世界 AABB 确实相交"), Scene.Mesh->Bounds.GetBox().Intersect(Range->Bounds.GetBox()));
+	TestFalse(TEXT("旋转碰撞体仅 AABB 重叠不能放行取出"), Scene.Begin());
+	Scene.Source->SetActorTransform(Start);
+	Scene.Mesh->SetWorldScale3D(FVector::OneVector);
+	TestTrue(TEXT("重新移动到真实相交位置即可取出"), Scene.Begin());
+	Scene.Extract->EndExtract(false);
+
+	Range->GetOwner()->Destroy();
+	TestFalse(TEXT("指定外部 Actor 被销毁后不能退回随处取出"), Scene.Begin());
+	SetExtractionRange(Scene.Extract, nullptr);
+	TestTrue(TEXT("显式清空可选引用后恢复无限制取出"), Scene.Begin());
+	Scene.Extract->EndExtract(false);
+
+	SetExtractionRange(Scene.Extract, Scene.Mesh);
+	TestFalse(TEXT("只指定源模型自身碰撞不能通过自重叠放行"), Scene.Begin());
+	UBoxComponent* AttachedRange = NewObject<UBoxComponent>(Scene.Source);
+	AttachedRange->SetBoxExtent(FVector(20));
+	AttachedRange->SetupAttachment(Scene.Mesh);
+	Scene.Source->AddInstanceComponent(AttachedRange);
+	AttachedRange->RegisterComponent();
+	SetExtractionRange(Scene.Extract, AttachedRange);
+	TestTrue(TEXT("指定同 Actor 的另一碰撞体仍可比较实际形状"), Scene.Begin());
+	Scene.Extract->EndExtract(false);
+	AttachedRange->DestroyComponent();
+	TestFalse(TEXT("动态移除指定组件后拒绝取出"), Scene.Begin());
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDreamMiniatureExtractionPlaneTest,
 	"DreamSpace.Puzzle.Extraction.DisplayPlaneKeepsOutsideUV",
@@ -263,6 +356,23 @@ bool FDreamMiniatureExtractionControllerTest::RunTest(const FString& Parameters)
 	const FVector CenterRay = Display->GetComponentLocation() - Camera;
 	Controller->SetIgnoreLookInput(true);
 	UDreamDraggableComponent* OtherDrag = AddExtractionTestComponent<UDreamDraggableComponent>(Scene.Source);
+	// 补齐自由组件所需枢轴，并从真实手办点击入口验证范围外回退及范围内的排他优先级。
+	UDreamPivotPointComponent* Pivot = AddExtractionTestComponent<UDreamPivotPointComponent>(Scene.Source);
+	Pivot->AttachToComponent(Scene.Mesh, FAttachmentTransformRules::KeepRelativeTransform);
+	OtherDrag->ReinitializeReference();
+	UBoxComponent* Range = AddExtractionRange(Scene.World, Scene.Source->GetActorLocation() + FVector(400, 0, 0), FVector(20));
+	SetExtractionRange(Scene.Extract, Range);
+	Controller->InteractWithMiniatureRay(Camera, CenterRay);
+	TestTrue(TEXT("范围外真实手办拾取只开始自由拖动并保留源模型"), Controller->IsDraggingInteraction() &&
+		OtherDrag->IsDragging() && !Scene.Extract->IsExtracting() && !Scene.Source->IsHidden() &&
+		!Scene.Extract->GetPreviewItem());
+	OtherDrag->UpdateDrag(Capture->GetActorLocation(), FVector::ForwardVector, FVector2D(80, 0));
+	TestTrue(TEXT("范围外自由拖动可实际移动源 Actor"), OtherDrag->GetCurrentTranslation() > 1.0f);
+	Range->GetOwner()->SetActorLocation(Scene.Source->GetActorLocation());
+	TestTrue(TEXT("自由拖动期间进入范围不会突然开始取出"), OtherDrag->IsDragging() && !Scene.Extract->IsExtracting());
+	Controller->CancelMiniatureDrag();
+	OtherDrag->SetTranslation(0.0f);
+	Range->GetOwner()->SetActorLocation(Scene.Source->GetActorLocation());
 	Controller->InteractWithMiniatureRay(Camera, CenterRay);
 	TestTrue(TEXT("完整捕获拾取入口开始取出并锁定输入"),
 		Controller->IsDraggingInteraction() && Scene.Extract->IsExtracting() && Controller->IsMoveInputIgnored());

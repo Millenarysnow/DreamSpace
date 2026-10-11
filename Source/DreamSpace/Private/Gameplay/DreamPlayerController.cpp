@@ -541,19 +541,23 @@ void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrig
 		ReportMiniatureClick(TEXT("已映射；捕获射线未命中，请检查目标碰撞、通道和检测距离"), FColor::Red);
 		return;
 	}
-	// 取出组件在手办模式优先，只开启一个持续行为；不能再同时触发该 Actor 的旋转或平移。
+	// 满足可选位置条件时取出优先，只开启一个持续行为；范围外继续交给下方自由拖动分发。
+	// 只在按下时选定行为，持有自由拖动期间进入许可范围也不会突然隐藏源物体；松开再抓取即可取出。
 	// 仍使用上方完整的遮挡与捕获拾取路径，墙后或捕获黑名单中的模型不会被越过来取出。
 	if (UDreamMiniatureExtractableComponent* Extract = HitActor->FindComponentByClass<UDreamMiniatureExtractableComponent>())
 	{
-		FVector PlaneHit, FrontNormal;
-		FVector2D UV;
-		if (!bMiniatureInteractionMode || !Miniature->TryMapViewRayToDisplayPlane(
-			ViewRayOrigin, ViewRayDirection, PlaneHit, UV, FrontNormal, FailureReason))
+		if (Extract->CanExtractAtCurrentLocation())
+		{
+			FVector PlaneHit, FrontNormal;
+			FVector2D UV;
+			if (!bMiniatureInteractionMode || !Miniature->TryMapViewRayToDisplayPlane(
+				ViewRayOrigin, ViewRayDirection, PlaneHit, UV, FrontNormal, FailureReason))
+				return;
+			BeginMiniatureExtract(Extract, CaptureHit.GetComponent(), DisplayHit, FrontNormal);
+			ReportMiniatureClick(IsDraggingInteraction() ? TEXT("已抓取模型；拖出手办显示面后松开左键") :
+				TEXT("取出未开始，请检查源模型和掉落物配置"), IsDraggingInteraction() ? FColor::Green : FColor::Red);
 			return;
-		BeginMiniatureExtract(Extract, CaptureHit.GetComponent(), DisplayHit, FrontNormal);
-		ReportMiniatureClick(IsDraggingInteraction() ? TEXT("已抓取模型；拖出手办显示面后松开左键") :
-			TEXT("取出未开始，请检查源模型和掉落物配置"), IsDraggingInteraction() ? FColor::Green : FColor::Red);
-		return;
+		}
 	}
 	// 首个非交互物体仍是遮挡物，不能穿过去寻找后方机关。
 	const bool bHitComponentInteractable = HitComponent &&

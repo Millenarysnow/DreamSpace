@@ -18,6 +18,9 @@
 5. **掉落物类** 默认 `DreamDroppedItem`。钥匙选择 `DreamDroppedKey`，掉落后即可用 E 拾取；
    也可以指定掉落物的蓝图子类，扩展声音和特效。
 6. **成功后销毁源 Actor** 默认开启。关闭时保留原 Actor 引用，但将它永久隐藏、关闭碰撞并标记已取出。
+7. 可选 **手办取出 → 条件 → 允许取出的重叠碰撞体（可选）**：留空保持随处取出；填写后只在所属 Actor
+   的查询碰撞与指定碰撞体实际相交时取出，范围外由同 Actor 的 `Dream Draggable` 承接自由拖动。
+   外部碰撞体在关卡实例中选择。详细配置见 [条件取出与钥匙转动](DreamSpace_条件取出与钥匙转动.md)。
 
 本组件不移动房间里的源 Actor，因此不需要枢轴，也不要求源网格为 Movable。
 源网格应是静置的普通静态网格组件，不能正在模拟物理；不支持骨骼网格、实例化静态网格
@@ -34,8 +37,8 @@
   **拖出边缘阈值** 默认 `0.02 UV`，约为对应显示尺寸的 2%。
 - 在显示面内松开、从面外拖回面内再松开、Tab 切换模式或输入取消，均删除预览并恢复源模型。
 - 失去操控角色、停用/销毁组件、预览被销毁、关卡退出以及显示面映射失效，均取消尚未提交的操作。
-- 世界 E 交互不会开始取出；手办命中带本组件的 Actor 时，它优先于同 Actor 的自由和步进组件。
-  推荐一个实际物体配置一种持续交互，避免其它脚本同时修改源 Actor 的状态。
+- 世界 E 交互不会开始取出；手办命中带本组件的 Actor 且满足可选位置条件时，取出优先于同 Actor 的自由和步进组件。
+  不满足条件时执行现有自由拖动；一次按住期间不切换行为，进入区域后松开再抓取即可取出。
 
 松开左键时控制器会重新采样当前位置，避免按上一帧的面外位置误提交。
 Enhanced Input 的 `Completed` 才尝试提交，`Canceled` 和逐帧丢失按键的兜底检查只取消。
@@ -84,6 +87,7 @@ Enhanced Input 的 `Completed` 才尝试提交，`Canceled` 和逐帧丢失按�
 
 | 入口 | 用途 |
 |---|---|
+| `CanExtractAtCurrentLocation()` | 查询是否满足可选位置条件及取出状态 |
 | `BeginExtract(Interactor, HitComponent, InitialDisplayPoint, DisplayFrontNormal)` | 以显示面世界交点开始抓取 |
 | `UpdateExtract(DisplayPoint, UnclampedUV, DisplayFrontNormal)` | 更新预览位置和是否越过边缘 |
 | `EndExtract(bTryDrop)` | 正常松开传 true，中断传 false；返回是否成功生成掉落物 |
