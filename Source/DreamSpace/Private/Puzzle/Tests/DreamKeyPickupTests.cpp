@@ -72,6 +72,8 @@ struct FKeyPickupFixture
 		World->SpawnActor<ADreamSceneCaptureAnchor>();
 		Character->SceneMiniature->RenderTargetWidth = 256;
 		Character->SceneMiniature->RenderTargetHeight = 256;
+		// 钥匙的取出依赖已经获得手办，夹具明确准备此前置条件，不修改正式游戏的初始状态。
+		Character->AcquireMiniature();
 		Character->SceneMiniature->BeginPlay();
 		// 隔离世界没有客户端 RPC 生命周期，直接执行引擎创建 HUD 的实现，仍通过 GetHUD 验证角色通知。
 		Controller->ClientSetHUD_Implementation(ADreamHUD::StaticClass());

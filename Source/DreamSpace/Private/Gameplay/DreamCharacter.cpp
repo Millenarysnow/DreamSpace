@@ -96,6 +96,8 @@ ADreamCharacter::ADreamCharacter()
 	// 手办显示面仍然挂在角色胶囊体右前方，位置、180 度显示朝向和相机映射
 	// 与原有实现保持一致。该组件的 SceneCapture 不参与角色移动输入。
 	SceneMiniature = CreateDefaultSubobject<UDreamSceneCapturePresentationComponent>(TEXT("SceneMiniature"));
+	// 保留显示组件及其取景配置，但玩家开局没有手办。光点拾取成功后才启用捕获和显示面。
+	SceneMiniature->bEnabledAtBeginPlay = false;
 	SceneMiniature->SetupAttachment(GetCapsuleComponent());
 	SceneMiniature->SetRelativeLocation(FVector(75.0f, 55.0f, 35.0f));
 	SceneMiniature->SetRelativeRotation(FRotator(0.0f, 180.0f, 0.0f));
@@ -131,6 +133,15 @@ ADreamCharacter::ADreamCharacter()
 	MoveAction = MoveInput.Object;
 	LookAction = LookInput.Object;
 	MouseLookAction = MouseLookInput.Object;
+}
+
+void ADreamCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+	// 蓝图可能还保存着旧版的 bEnabledAtBeginPlay=true。此处在组件 BeginPlay 前按持有状态
+	// 再同步一次，确保原生角色和角色蓝图都不会闪现一帧手办；不改写其他独立捕获组件。
+	if (SceneMiniature)
+		SceneMiniature->bEnabledAtBeginPlay = bHasMiniature;
 }
 
 void ADreamCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -222,7 +233,7 @@ void ADreamCharacter::DoLook(float Yaw, float Pitch)
 	// 手办交互模式下鼠标负责在显示面上选点，不能同时改变第三人称相机。
 	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
 	{
-		if (DreamController->IsMiniatureInteractionMode())
+		if (DreamController->IsMiniatureInteractionMode() || DreamController->IsEnteringPassword())
 		{
 			return;
 		}
@@ -240,7 +251,7 @@ void ADreamCharacter::DoJumpStart()
 	// Tab 聚焦期间保持手持显示面稳定，避免跳跃输入绕过控制器的移动忽略计数。
 	// 仍允许已经发生的下落与平台搬运，退出观察后立即恢复原来的跳跃入口。
 	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
-		if (DreamController->IsMiniatureInteractionMode())
+		if (DreamController->IsMiniatureInteractionMode() || DreamController->IsEnteringPassword())
 			return;
 	Jump();
 }
@@ -264,4 +275,20 @@ void ADreamCharacter::AcquireKey()
 		if (ADreamHUD* HUD = Cast<ADreamHUD>(PlayerController->GetHUD()))
 			HUD->ShowKeyAcquiredMessage();
 	}
+}
+
+void ADreamCharacter::AcquireMiniature()
+{
+	if (bHasMiniature)
+		return;
+	// 持有状态只在成功领取后改变。显示仍复用原来的组件，不创建第二份手办或替换取景锚点。
+	bHasMiniature = true;
+	if (SceneMiniature)
+	{
+		SceneMiniature->bEnabledAtBeginPlay = true;
+		SceneMiniature->SetPresentationEnabled(true);
+	}
+	if (const APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+		if (ADreamHUD* HUD = Cast<ADreamHUD>(PlayerController->GetHUD()))
+			HUD->ShowMiniatureAcquiredMessage();
 }

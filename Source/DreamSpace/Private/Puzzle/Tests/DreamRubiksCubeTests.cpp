@@ -431,6 +431,8 @@ bool FDreamRubiksControllerTest::RunTest(const FString& Parameters)
 	UDreamSceneCapturePresentationComponent* Miniature = Character->SceneMiniature;
 	Miniature->RenderTargetWidth = 256;
 	Miniature->RenderTargetHeight = 256;
+	// 魔方的捕获拾取属于手办解锁后的行为。
+	Character->AcquireMiniature();
 	Miniature->BeginPlay();
 	UStaticMeshComponent* Display = nullptr;
 	TArray<UStaticMeshComponent*> Meshes;

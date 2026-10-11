@@ -63,6 +63,8 @@ namespace
 			// 测试只验证投影与输入生命周期，降低瞬时 RT 大小以减少无窗口回归占用。
 			Miniature->RenderTargetWidth = 256;
 			Miniature->RenderTargetHeight = 256;
+			// 本套件验证已持有手办后的观察；解锁前的空手状态由密码箱套件单独覆盖。
+			Character->AcquireMiniature();
 			Miniature->BeginPlay();
 			TInlineComponentArray<UStaticMeshComponent*> Meshes(Character);
 			for (UStaticMeshComponent* Mesh : Meshes)
@@ -524,6 +526,8 @@ bool FDreamMiniatureGameplayRenderTest::RunTest(const FString& Parameters)
 	if (!TestNotNull(TEXT("独立游戏进程存在原生 DreamCharacter"), Character))
 		return false;
 	Controller->SetMiniatureInteractionMode(false);
+	// 此渲染入口专门验收手办构图，显式准备已获得状态，正常游戏仍需要打开密码箱。
+	Character->AcquireMiniature();
 	const FString Directory = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Screenshots/MiniatureInspection"));
 	IFileManager::Get().MakeDirectory(*Directory, true);
 	struct FRenderState

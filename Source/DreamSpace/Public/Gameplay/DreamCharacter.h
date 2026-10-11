@@ -27,6 +27,9 @@ class DREAMSPACE_API ADreamCharacter : public ACharacter
 public:
 	ADreamCharacter();
 
+	/** 在组件开始游戏前统一设置手办初始状态，避免旧角色蓝图覆盖显示组件的默认开关。 */
+	virtual void PostInitializeComponents() override;
+
 	/** 由 Enhanced Input 触发的原生输入绑定。 */
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 
@@ -56,6 +59,17 @@ public:
 	 * 掉落物负责确认拾取与移除自身；角色保存结果，后续门锁等机关可直接读取 bHasKey。
 	 */
 	void AcquireKey();
+
+	/**
+	 * 密码箱的光点抵达玩家后调用：先保存持有状态，再启用已有的手办显示与场景捕获。
+	 * 重复调用不会重复显示获得提示；在 BeginPlay 前调用也会把启用状态交给组件初始化。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "物品|手办")
+	void AcquireMiniature();
+
+	/** 当前角色是否已获得手办；初始为空手，由密码箱拾取流程授予，供 HUD 和机关读取。 */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "物品|手办", meta = (DisplayName = "已获得手办"))
+	bool bHasMiniature = false;
 
 	/**
 	 * 当前角色是否已经获得钥匙，初始为 false，成功拾取后为 true。

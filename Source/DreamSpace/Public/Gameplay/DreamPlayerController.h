@@ -9,12 +9,14 @@ class UDreamMiniatureExtractableComponent;
 class UDreamSceneCapturePresentationComponent;
 class UDreamShoulderCameraComponent;
 class UPrimitiveComponent;
+class ADreamPasswordChest;
 struct FInputActionValue;
+struct FInputKeyEventArgs;
 
 /**
  * 第三人称探索控制器：安装输入映射，管理视角、拾取、单次交互和持续拖动输入。
  * 旧的策划可配置交互框架（选择/会话/事务/撤销等）已整体移除；
- * 具体的解谜行为全部由挂在 Actor 上的组件实现，控制器不感知细节。
+ * 具体的解谜行为由目标 Actor 或其交互组件实现，控制器只管理拾取分发和输入会话。
  */
 UCLASS()
 class DREAMSPACE_API ADreamPlayerController : public APlayerController
@@ -29,6 +31,18 @@ public:
 	virtual void UpdateRotation(float DeltaTime) override;
 	virtual void PlayerTick(float DeltaTime) override;
 	virtual void OnUnPossess() override;
+	/** UE5.8 的原始按键入口：密码会话先消费数字/确认/取消，防止按键同时触发探索动作。 */
+	virtual bool InputKey(const FInputKeyEventArgs& Params) override;
+	/** 由密码箱的统一交互接口开启输入；只有本地、近距离、尚未获得手办的角色可以进入。 */
+	bool BeginPasswordEntry(ADreamPasswordChest* Chest);
+	/** 成功、取消、箱子移除及失去 Pawn 共用同一清理入口，每次仅释放本会话添加的输入锁。 */
+	void ClosePasswordEntry();
+	/** HUD 与角色共用这个状态，分别控制密码面板和跳跃/视角输入。 */
+	UFUNCTION(BlueprintPure, Category = "交互|密码箱")
+	bool IsEnteringPassword() const { return bPasswordInputLocked; }
+	ADreamPasswordChest* GetActivePasswordChest() const { return ActivePasswordChest.Get(); }
+	const FString& GetEnteredPassword() const { return EnteredPassword; }
+	const FString& GetPasswordEntryMessage() const { return PasswordEntryMessage; }
 	/** 是否正在持续拖动机关或从手办取出模型；角色与相机用此状态保持交互期间的输入稳定。 */
 	UFUNCTION(BlueprintPure, Category = "交互")
 	bool IsDraggingInteraction() const;
@@ -120,6 +134,9 @@ private:
 	friend class FDreamMiniatureInspectionRotationTest;
 	friend class FDreamMiniatureGameplayRenderTest;
 	friend class FDreamRubiksControllerTest;
+	friend class FDreamPasswordChestFlowTest;
+	friend class FDreamPasswordChestSessionTest;
+	friend class FDreamPasswordChestGameplayRenderTest;
 	/** 在本地玩家已绑定后安装官方模板和项目交互的 Enhanced Input 映射。 */
 	void ApplyInputMapping();
 	/** 将命中的组件和所属 Actor 上的可交互组件统一分发。 */
@@ -147,6 +164,17 @@ private:
 	bool bDragFromMiniature = false;
 	/** 每次拖动仅成对增加/减少一次输入忽略计数，不覆盖其他系统已有的输入锁。 */
 	bool bDragInputLocked = false;
+
+	/** 输入会话只持弱引用，箱子卸载、重生或切换角色时不会延长旧对象的生命。 */
+	TWeakObjectPtr<ADreamPasswordChest> ActivePasswordChest;
+	TWeakObjectPtr<APawn> PasswordPawn;
+	/** 输入缓冲是字符串，前导零不会丢失；永远只允许四位 ASCII 数字。 */
+	FString EnteredPassword;
+	FString PasswordEntryMessage;
+	bool bPasswordInputLocked = false;
+	void HandlePasswordKey(const FKey& Key);
+	/** 每帧验证输入目标、距离、Pawn、ViewTarget 和视口焦点，避免不可见面板继续锁住输入。 */
+	void UpdatePasswordEntry();
 
 	/** 每条退出路径都记录诊断；仅在调试 CVar 开启时输出，不影响玩法结果。 */
 	void ReportMiniatureClick(const FString& Message, const FColor& Color);

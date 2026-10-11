@@ -6,6 +6,7 @@
 #include "DreamInteractableInterface.h"
 #include "DreamDragInteractionComponent.h"
 #include "DreamMiniatureExtractableComponent.h"
+#include "DreamPasswordChest.h"
 #include "DreamSpace.h"
 #include "DreamProximitySketchCameraManager.h"
 #include "EnhancedInputComponent.h"
@@ -77,6 +78,7 @@ void ADreamPlayerController::ReceivedPlayer()
 
 void ADreamPlayerController::EndPlay(const EEndPlayReason::Type Reason)
 {
+	ClosePasswordEntry();
 	EndActiveDrag();
 	if (bMiniatureInteractionMode)
 		SetMiniatureInteractionMode(false, false);
@@ -193,7 +195,7 @@ void ADreamPlayerController::UpdateRotation(float Delta)
 {
 	// 平台可能在本帧主动旋转玩家重力和视角；拖动期间保留该完整姿态，
 	// 不再用鼠标或重力相对欧拉角覆盖它，以免拖动射线和手办画面来回偏移。
-	if (bMiniatureInteractionMode || IsDraggingInteraction())
+	if (bMiniatureInteractionMode || IsDraggingInteraction() || IsEnteringPassword())
 		return;
 	// 在自定义重力场景中，把控制旋转转换到重力相对空间再叠加输入，保证相机姿态始终贴合当前重力方向。
 	auto* ControlledCharacter = Cast<ADreamCharacter>(GetPawn());
@@ -210,7 +212,7 @@ void ADreamPlayerController::UpdateRotation(float Delta)
 void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
 {
 	// 拖动时保持相机投影稳定，防止滚轮缩放被误解成物体移动。
-	if (bMiniatureInteractionMode || IsDraggingInteraction())
+	if (bMiniatureInteractionMode || IsDraggingInteraction() || IsEnteringPassword())
 		return;
 	const float WheelDelta = Value.Get<float>();
 	if (FMath::IsNearlyZero(WheelDelta))
@@ -233,10 +235,10 @@ void ADreamPlayerController::ZoomCamera(const FInputActionValue& Value)
 void ADreamPlayerController::Interact()
 {
 	// 手办模式下 E 不应越过手办去触发主视口中心的世界物体。
-	if (bMiniatureInteractionMode || IsDraggingInteraction())
+	if (bMiniatureInteractionMode || IsDraggingInteraction() || IsEnteringPassword())
 		return;
-	// 从相机中心向前做射线检测，命中后调用该 Actor 上所有实现了可交互接口的组件。
-	// 控制器负责拾取和输入生命周期，具体的转动、拖动或开关行为由组件决定。
+	// 从相机中心向前做射线检测，命中后优先调用 Actor 的接口，否则分发给交互组件。
+	// 控制器负责拾取和输入生命周期，具体的转动、拖动或开关行为由目标机关决定。
 	FVector Origin;
 	FRotator Rotation;
 	GetPlayerViewPoint(Origin, Rotation);
@@ -281,7 +283,7 @@ void ADreamPlayerController::ToggleMiniatureInteractionMode()
 
 void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled, bool bBlendCamera)
 {
-	if (bMiniatureInteractionMode == bEnabled || (bEnabled && !IsLocalController()))
+	if (bMiniatureInteractionMode == bEnabled || (bEnabled && (!IsLocalController() || IsEnteringPassword())))
 		return;
 	// 模式切换会改变射线所属空间；先结束当前拖动，不能把主视口输入续接到捕获相机。
 	EndActiveDrag();
@@ -290,6 +292,9 @@ void ADreamPlayerController::SetMiniatureInteractionMode(bool bEnabled, bool bBl
 	{
 		if (ADreamCharacter* ControlledCharacter = Cast<ADreamCharacter>(GetPawn()))
 		{
+			// 显示组件存在不代表拥有手办；外部脚本单独打开显示时，也不能绕过实际的光点拾取。
+			if (!ControlledCharacter->bHasMiniature)
+				return;
 			UDreamSceneCapturePresentationComponent* Miniature = ControlledCharacter->SceneMiniature;
 			UDreamShoulderCameraComponent* Camera = Cast<UDreamShoulderCameraComponent>(ControlledCharacter->CameraBoom);
 			if (!Miniature || !Camera || !ControlledCharacter->FollowCamera || !Miniature->BeginInspection())
@@ -553,7 +558,7 @@ void ADreamPlayerController::InteractWithMiniatureRay(const FVector& ViewRayOrig
 	// 首个非交互物体仍是遮挡物，不能穿过去寻找后方机关。
 	const bool bHitComponentInteractable = HitComponent &&
 		HitComponent->GetClass()->ImplementsInterface(UDreamInteractableInterface::StaticClass());
-	if (!bHitComponentInteractable &&
+	if (!HitActor->GetClass()->ImplementsInterface(UDreamInteractableInterface::StaticClass()) && !bHitComponentInteractable &&
 		HitActor->GetComponentsByInterface(UDreamInteractableInterface::StaticClass()).IsEmpty())
 	{
 		ReportMiniatureClick(FString::Printf(TEXT("已命中 %s / %s，但该 Actor 没有交互组件"),
@@ -573,6 +578,14 @@ void ADreamPlayerController::DispatchInteraction(AActor* HitActor, UActorCompone
 		HitActor = HitComponent->GetOwner();
 	if (!HitActor && !HitComponent)
 		return;
+
+	// 密码箱这类可直接摆放的完整机关可以在 Actor 上实现同一接口。
+	// Actor 明确承接交互时不再同时触发其子组件，避免开锁与其它运动行为竞争同一次 E 输入。
+	if (HitActor && HitActor->GetClass()->ImplementsInterface(UDreamInteractableInterface::StaticClass()))
+	{
+		IDreamInteractableInterface::Execute_OnInteracted(HitActor, GetPawn());
+		return;
+	}
 
 	// 自由组件接收持续射线，而不是一次性 OnInteracted。每次只选一个自由组件，
 	// 直接命中的组件优先；普通 ActorComponent 不参与射线命中，因此退回 Actor 上第一个。
@@ -672,6 +685,7 @@ void ADreamPlayerController::BeginActiveDrag(
 void ADreamPlayerController::PlayerTick(float DeltaTime)
 {
 	Super::PlayerTick(DeltaTime);
+	UpdatePasswordEntry();
 	// 停用显示、销毁角色或外部切换 ViewTarget 都不能留下 Tab 输入锁。
 	// 通过当前会话的弱引用检查旧对象，避免新 Pawn 意外继承上一位角色的观察状态。
 	if (bMiniatureInputLocked && (!InspectedMiniature.IsValid() || !MiniatureFocusCamera.IsValid()
@@ -840,6 +854,7 @@ void ADreamPlayerController::EndActiveDrag(bool bTryCommitMiniatureExtract)
 
 void ADreamPlayerController::OnUnPossess()
 {
+	ClosePasswordEntry();
 	if (bMiniatureInteractionMode)
 		SetMiniatureInteractionMode(false, false);
 	EndActiveDrag();
