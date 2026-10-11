@@ -119,6 +119,12 @@ bool UDreamRubiksCubeComponent::EnsureInitialized()
 	return RebuildCube();
 }
 
+void UDreamRubiksCubeComponent::RebuildCubeInEditor()
+{
+	// 详情面板只能调用无参数、无返回值的入口，实际重建仍复用统一的配置校验与模型清理逻辑。
+	RebuildCube();
+}
+
 bool UDreamRubiksCubeComponent::RebuildCube()
 {
 	if (IsDragging() || bTurning || bNotifying || !IsConfigurationValid())

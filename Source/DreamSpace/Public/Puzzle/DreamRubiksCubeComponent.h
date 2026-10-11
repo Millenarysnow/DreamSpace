@@ -56,11 +56,19 @@ public:
 	virtual void EndDrag() override;
 
 	/**
-	 * 从配置重新构建完整魔方；编辑器按钮可用于预览。播放期间非拖动、非转动时也能调用。
+	 * 从配置重新构建完整魔方，返回是否成功。播放期间非拖动、非转动时也能调用。
 	 * 自定义角块以重建时的姿态作为新的还原姿态，因此重新绑定模型后需要调用本函数。
 	 */
-	UFUNCTION(BlueprintCallable, CallInEditor, Category = "二阶魔方")
+	UFUNCTION(BlueprintCallable, Category = "二阶魔方")
 	bool RebuildCube();
+
+	/**
+	 * 关卡实例详情面板中的 Rebuild Cube 按钮入口，调用与蓝图重建相同的实现。
+	 * UE 只为反射参数帧为空的 CallInEditor 函数生成按钮；返回值也占用参数帧，
+	 * 因此按钮必须使用无参数的 void 函数，蓝图则继续通过 RebuildCube 获取成功状态。
+	 */
+	UFUNCTION(CallInEditor, Category = "二阶魔方", meta = (DisplayName = "Rebuild Cube"))
+	void RebuildCubeInEditor();
 
 	/**
 	 * 转动指定局部轴的正/负半层。LayerSign 和 Direction 均只接受 -1 或 +1。

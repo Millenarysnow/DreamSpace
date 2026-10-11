@@ -225,7 +225,29 @@ bool FDreamRubiksShuffleTest::RunTest(const FString& Parameters)
 	Scene.Cube->ResetCube();
 	TestTrue(TEXT("复位恢复原始姿态"), MatchesSnapshot(Scene, Initial) && Scene.Cube->IsSolved());
 	for (int32 Index = 0; Index < 3; ++Index)
-		TestTrue(TEXT("编辑器重建按钮可以反复使用"), Scene.Cube->RebuildCube());
+		TestTrue(TEXT("蓝图重建接口可以反复使用"), Scene.Cube->RebuildCube());
+#if WITH_EDITOR
+	// 仅调用 bool 重建接口无法发现详情面板按钮被 UE 过滤掉的问题。
+	// 检查 UHT 实际生成的反射参数帧（返回值也算参数），再走按钮所用的 ProcessEvent 路径。
+	UFunction* EditorRebuild =
+		Scene.Cube->FindFunction(GET_FUNCTION_NAME_CHECKED(UDreamRubiksCubeComponent, RebuildCubeInEditor));
+	if (TestNotNull(TEXT("编辑器重建入口已注册到反射系统"), EditorRebuild))
+	{
+		TestTrue(TEXT("重建入口声明为编辑器按钮"), EditorRebuild->GetBoolMetaData(TEXT("CallInEditor")));
+		if (TestEqual(
+				TEXT("编辑器按钮的反射参数帧为空，满足 UE 详情面板的显示条件"), EditorRebuild->ParmsSize, uint16(0)))
+		{
+			for (int32 Index = 0; Index < 3; ++Index)
+			{
+				// 每次先改变题面，避免空实现也因为原本已还原而误通过按钮功能检查。
+				TestTrue(TEXT("按钮验证前先打乱题面"), Scene.Cube->ShuffleCube(20, 2026 + Index));
+				Scene.Cube->ProcessEvent(EditorRebuild, nullptr);
+				TestTrue(TEXT("通过编辑器按钮入口重建恢复完整还原姿态"),
+					MatchesSnapshot(Scene, Initial) && Scene.Cube->IsSolved());
+			}
+		}
+	}
+#endif
 	TestEqual(TEXT("重建不会累积重复网格或重复碰撞"), CountMeshes(Scene.Owner), 32);
 	SetRubiksBool(Scene.Cube, TEXT("bShuffleOnBeginPlay"), true);
 	Scene.Cube->BeginPlay();
