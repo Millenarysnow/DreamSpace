@@ -65,14 +65,21 @@ def parameter(material, parameter_type, name, value, x, y, description):
 
 
 def add_local_clip(material):
-    # 原模板已有自己的遮罩（包括第一人称相关逻辑）。保留它，与新增局部遮罩相乘。
+    # 保留原有头发遮罩或透明度；不透明材质则以 1 作为原始覆盖率。
     if 'DreamOwnerClipAmount' in [str(name) for name in LIBRARY.get_scalar_parameter_names(material)]:
         unreal.log('CAMERA_CLIP_GENERATE 已接入局部剔除，保留现有图表: ' + material.get_path_name())
         return
-    require(not material.get_editor_property('use_material_attributes'), '该生成器只支持模板的独立属性图')
-    original_mask = require(LIBRARY.get_material_property_input_node(material, unreal.MaterialProperty.MP_OPACITY_MASK),
-                            '模板缺少原始 OpacityMask')
-    original_output = LIBRARY.get_material_property_input_node_output_name(material, unreal.MaterialProperty.MP_OPACITY_MASK)
+    require(not material.get_editor_property('use_material_attributes'), '该生成器需要独立的材质属性图')
+    blend = material.get_editor_property('blend_mode')
+    require(blend in (unreal.BlendMode.BLEND_OPAQUE, unreal.BlendMode.BLEND_MASKED,
+                      unreal.BlendMode.BLEND_TRANSLUCENT), '不支持该材质的混合模式')
+    translucent = blend == unreal.BlendMode.BLEND_TRANSLUCENT
+    opacity_property = unreal.MaterialProperty.MP_OPACITY if translucent else unreal.MaterialProperty.MP_OPACITY_MASK
+    original_mask = LIBRARY.get_material_property_input_node(material, opacity_property)
+    original_output = LIBRARY.get_material_property_input_node_output_name(material, opacity_property) if original_mask else ''
+    if original_mask is None:
+        original_mask = node(material, unreal.MaterialExpressionConstant, -500, 1300, '原始不透明覆盖率')
+        original_mask.set_editor_property('r', 1.0)
 
     world = node(material, unreal.MaterialExpressionWorldPosition, -1800, 1600, '动画后表面世界位置')
     camera = node(material, unreal.MaterialExpressionCameraPositionWS, -1800, 1800, '当前渲染视角的镜头位置')
@@ -113,21 +120,26 @@ def add_local_clip(material):
     for name, source in inputs:
         connect(source, mask, name)
 
-    dither = node(material, unreal.MaterialExpressionMaterialFunctionCall, -800, 1600, '引擎时间抖动，只柔化局部边缘')
-    dither.set_editor_property('material_function', require(unreal.load_asset(
-        '/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA'), '缺少引擎 DitherTemporalAA'))
-    connect(mask, dither, 'Alpha Threshold')
+    coverage, coverage_output = mask, ''
+    if not translucent:
+        dither = node(material, unreal.MaterialExpressionMaterialFunctionCall, -800, 1600, '引擎时间抖动，只柔化局部边缘')
+        dither.set_editor_property('material_function', require(unreal.load_asset(
+            '/Engine/Functions/Engine_MaterialFunctions02/Utility/DitherTemporalAA'), '缺少引擎 DitherTemporalAA'))
+        connect(mask, dither, 'Alpha Threshold')
+        coverage, coverage_output = dither, 'Result'
     shadow = node(material, unreal.MaterialExpressionShadowReplace, -500, 1600, '投影时保留完整原始遮罩')
     opaque = node(material, unreal.MaterialExpressionConstant, -800, 1900, '阴影中的局部遮罩固定为 1')
     opaque.set_editor_property('r', 1.0)
-    connect(dither, shadow, 'Default', 'Result')
+    connect(coverage, shadow, 'Default', coverage_output)
     connect(opaque, shadow, 'Shadow')
     combined = node(material, unreal.MaterialExpressionMultiply, -200, 1400, '原模板遮罩乘局部遮罩')
     connect(original_mask, combined, 'A', original_output)
     connect(shadow, combined, 'B')
-    require(LIBRARY.connect_material_property(combined, '', unreal.MaterialProperty.MP_OPACITY_MASK), '无法发布 OpacityMask')
-    material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
-    LIBRARY.recompile_material(material)
+    require(LIBRARY.connect_material_property(combined, '', opacity_property), '无法发布局部覆盖率')
+    if not translucent:
+        material.set_editor_property('blend_mode', unreal.BlendMode.BLEND_MASKED)
+    errors = LIBRARY.recompile_material(material)
+    require(not errors, '局部剔除材质编译失败: ' + str(errors))
 
 
 def generate():
@@ -144,4 +156,5 @@ def generate():
         unreal.log('CAMERA_CLIP_GENERATE 已保存: ' + asset.get_path_name())
 
 
-generate()
+if __name__ == '__main__':
+    generate()

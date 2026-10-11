@@ -15,7 +15,6 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "InputAction.h"
 #include "InputActionValue.h"
-#include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
 
 ADreamCharacter::ADreamCharacter()
@@ -40,48 +39,38 @@ ADreamCharacter::ADreamCharacter()
 	Movement->BrakingDecelerationWalking = 2000.0f;
 	Movement->BrakingDecelerationFalling = 1500.0f;
 
-	// 角色网格直接在 C++ 中加载，去掉对 BP_ThirdPersonCharacter 的依赖。
-	// 资产路径与 UE5.8 官方第三人称 C++ 示例一致；当前工程已包含这些基础资产。
+	// 使用 WinsomeGirl 的项目专用副本；七个材质槽已接入越肩相机的局部剔除。
+	// 源素材不变，移动、碰撞、重力与手办仍由当前原生角色负责。
 	if (USkeletalMeshComponent* CharacterMesh = GetMesh())
 	{
-		CharacterMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -89.0f));
+		// 素材示例的胶囊半高 82.833916、网格 Z=-79.202759。
+		// 将相同的脚底间距迁移到当前 96 cm 胶囊，保持模型原始比例和碰撞尺寸。
+		CharacterMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -92.368843f));
 		CharacterMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
 
-		static ConstructorHelpers::FObjectFinder<USkeletalMesh> QuinnMesh(
-			TEXT("/Game/Characters/Mannequins/Meshes/SKM_Quinn_Simple.SKM_Quinn_Simple"));
-		if (QuinnMesh.Succeeded())
+		static ConstructorHelpers::FObjectFinder<USkeletalMesh> WinsomeGirlMesh(
+			TEXT("/Game/DreamCharacters/WinsomeGirl/SK_DreamWinsomeGirl.SK_DreamWinsomeGirl"));
+		if (WinsomeGirlMesh.Succeeded())
 		{
-			CharacterMesh->SetSkeletalMesh(QuinnMesh.Object);
-			// 使用独立副本，不修改共享的模板网格/材质。两槽保留 Quinn 的原贴图和颜色继承链。
-			// 相机只为支持 DreamOwnerClip 的材质建立本角色 MID；默认 Amount=0，正常距离完全可见。
-			static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClipBody(
-				TEXT("/Game/DreamCamera/Materials/MI_QuinnOwnerClip_01.MI_QuinnOwnerClip_01"));
-			static ConstructorHelpers::FObjectFinder<UMaterialInterface> ClipDetails(
-				TEXT("/Game/DreamCamera/Materials/MI_QuinnOwnerClip_02.MI_QuinnOwnerClip_02"));
-			if (ClipBody.Succeeded() && ClipDetails.Succeeded())
-			{
-				CharacterMesh->SetMaterial(0, ClipBody.Object);
-				CharacterMesh->SetMaterial(1, ClipDetails.Object);
-			}
-			else
-				UE_LOG(LogTemp, Error, TEXT("缺少局部剔除材质，请运行 Documents/Tools/GenerateOwnerClipMaterials.py；角色保持原材质可见。"));
+			CharacterMesh->SetSkeletalMesh(WinsomeGirlMesh.Object);
 		}
 		else
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("无法加载第三人称角色网格 SKM_Quinn_Simple，角色将使用空网格运行。"));
+				TEXT("无法加载 SK_DreamWinsomeGirl，请运行 Documents/Tools/GenerateWinsomeGirlCharacter.py。"));
 		}
 
-		static ConstructorHelpers::FClassFinder<UAnimInstance> QuinnAnim(
-			TEXT("/Game/Characters/Mannequins/Anims/Unarmed/ABP_Unarmed"));
-		if (QuinnAnim.Succeeded())
+		// 使用素材自带的 UE4 骨架动画；Quinn 的 UE5 动画与该骨架不匹配。
+		static ConstructorHelpers::FClassFinder<UAnimInstance> WinsomeGirlAnim(
+			TEXT("/Game/WinsomeGirl/Maps/ThirdPersonExampleMap/Mannequin/Animations/ThirdPerson_AnimBP"));
+		if (WinsomeGirlAnim.Succeeded())
 		{
-			CharacterMesh->SetAnimInstanceClass(QuinnAnim.Class);
+			CharacterMesh->SetAnimInstanceClass(WinsomeGirlAnim.Class);
 		}
 		else
 		{
 			UE_LOG(LogTemp, Warning,
-				TEXT("无法加载第三人称动画蓝图 ABP_Unarmed，角色将保持默认动画模式。"));
+				TEXT("无法加载 WinsomeGirl 配套的 ThirdPerson_AnimBP，角色将保持默认动画模式。"));
 		}
 	}
 
@@ -116,7 +105,7 @@ ADreamCharacter::ADreamCharacter()
 	SceneMiniature->RenderTargetHeight = 2500;
 
 	// 兼容旧的 BP_DreamCharacter：保留 Body 这个原生子对象名称，但隐藏旧圆柱，
-	// 避免旧蓝图重新加载时丢失组件，同时确保新角色只显示 Quinn 骨骼网格。
+	// 避免旧蓝图重新加载时丢失组件，同时确保新角色只显示 WinsomeGirl 骨骼网格。
 	Body = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Body"));
 	Body->SetupAttachment(GetCapsuleComponent());
 	Body->SetVisibility(false);
