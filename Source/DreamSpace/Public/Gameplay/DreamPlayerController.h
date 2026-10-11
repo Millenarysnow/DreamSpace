@@ -129,6 +129,7 @@ private:
 	friend class FDreamMiniatureDragMappingTest;
 	friend class FDreamMiniatureExtractionControllerTest;
 	friend class FDreamKeyPickupControllerTest;
+	friend class FDreamWorldRecoveryInteractionTest;
 	friend class FDreamMiniatureFocusLifecycleTest;
 	friend class FDreamMiniatureFocusTransitionTest;
 	friend class FDreamMiniatureInspectionRotationTest;

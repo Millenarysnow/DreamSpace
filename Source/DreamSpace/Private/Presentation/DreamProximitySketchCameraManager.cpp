@@ -44,6 +44,95 @@ ADreamProximitySketchCameraManager::ADreamProximitySketchCameraManager()
 		UE_LOG(LogDreamSpace, Error, TEXT("距离线稿平滑材质缺失，请先运行 generate_proximity_sketch.py。"));
 }
 
+float ADreamProximitySketchCameraManager::GetEffectiveNormalRadius() const
+{
+	// 恢复请求一旦被接受，动画半径就成为本玩家的运行时覆盖值。控制台仅提供恢复前的起点，
+	// 不清空或改写共享 CVar，防止另一个本地玩家、下一次 PIE 或美术调试配置被连带修改。
+	if (bWorldRecoveryActive || bWorldRecoveryFinished)
+		return WorldRecoveryCurrentRadius;
+	const float Override = CVarSketchRadius.GetValueOnGameThread();
+	const float Radius = Override < 0.0f ? NormalRadius : Override;
+	return FMath::IsFinite(Radius) ? FMath::Max(0.0f, Radius) : 0.0f;
+}
+
+bool ADreamProximitySketchCameraManager::StartWorldRecovery(
+	float TargetRadius, float Duration, bool bRestoreEntireWorld)
+{
+	// 组件的交互参数最终来自 Pawn，蓝图也可直接调用本入口，所以相机端再次检查本地操控关系。
+	// 没有有效 Pawn 时不消耗恢复机会；换角色后仍可继续使用同一个相机的恢复进度。
+	const int32 EnabledOverride = CVarSketchEnabled.GetValueOnGameThread();
+	const bool bEnabled = EnabledOverride < 0 ? bEnableProximitySketch : EnabledOverride != 0;
+	if (!IsValid(PCOwner) || !PCOwner->IsLocalController() || !IsValid(PCOwner->GetPawn())
+		|| GetNetMode() == NM_DedicatedServer || !bEnabled || !SketchMaterial
+		|| !FMath::IsFinite(EffectStrength) || EffectStrength <= 0.0f
+		|| !FMath::IsFinite(TargetRadius) || TargetRadius < 0.0f || !FMath::IsFinite(Duration)
+		|| (bWorldRecoveryFinished && bRestoreEntireWorldRequested))
+		return false;
+
+	const float CurrentRadius = GetEffectiveNormalRadius();
+	const float ExistingTarget = bWorldRecoveryActive ? WorldRecoveryTargetRadius : CurrentRadius;
+	const bool bExpandsFurther = TargetRadius > ExistingTarget;
+	const bool bPromotesToEntireWorld = bRestoreEntireWorld && !bRestoreEntireWorldRequested;
+	// 同目标重复交互既不回缩，也不重置计时；否则按住 / 连点交互键会让恢复永远无法结束。
+	// 从阶段扩张升级为全世界恢复时，即使半径没有增加，也允许执行最后的线稿淡出。
+	if (!bExpandsFurther && !bPromotesToEntireWorld)
+		return false;
+
+	WorldRecoveryStartRadius = CurrentRadius;
+	WorldRecoveryCurrentRadius = CurrentRadius;
+	WorldRecoveryTargetRadius = FMath::Max(TargetRadius, ExistingTarget);
+	WorldRecoveryStartStrength = WorldRecoveryCurrentStrength;
+	WorldRecoveryDuration = FMath::Max(0.0f, Duration);
+	WorldRecoveryElapsed = 0.0f;
+	// 全世界恢复一旦开始，后来的阶段扩张不能把它降级回线稿，避免多个机关互相撤销结果。
+	bRestoreEntireWorldRequested |= bRestoreEntireWorld;
+	bWorldRecoveryFinished = false;
+	bWorldRecoveryActive = true;
+	if (WorldRecoveryDuration <= 0.0f)
+		CompleteWorldRecovery();
+	return true;
+}
+
+void ADreamProximitySketchCameraManager::UpdateCamera(float DeltaTime)
+{
+	// 引擎混合两个 ViewTarget 时会各自执行 ApplyCameraModifiers，必须在更外层推进一次。
+	// DeltaTime 来自游戏相机更新，随游戏时间缩放；暂停或临时取消占有时保持当前进度，
+	// 重新占有后从同一半径继续，因此不会在没有玩家视图的间隙悄悄完成恢复。
+	if (IsValid(PCOwner) && PCOwner->IsLocalController() && IsValid(PCOwner->GetPawn())
+		&& GetWorld() && !GetWorld()->IsPaused())
+		UpdateWorldRecovery(DeltaTime);
+	Super::UpdateCamera(DeltaTime);
+}
+
+void ADreamProximitySketchCameraManager::UpdateWorldRecovery(float DeltaTime)
+{
+	if (!bWorldRecoveryActive || !FMath::IsFinite(DeltaTime) || DeltaTime <= 0.0f)
+		return;
+	WorldRecoveryElapsed = FMath::Min(WorldRecoveryDuration, WorldRecoveryElapsed + DeltaTime);
+	const float Alpha = WorldRecoveryElapsed / WorldRecoveryDuration;
+	// 固定时长的 SmoothStep 在起点和终点速度为零；按累计游戏时间求值，帧率不会改变动画时长。
+	const float Ease = Alpha * Alpha * (3.0f - 2.0f * Alpha);
+	WorldRecoveryCurrentRadius = FMath::Lerp(WorldRecoveryStartRadius, WorldRecoveryTargetRadius, Ease);
+	if (bRestoreEntireWorldRequested)
+	{
+		// 距离遮罩会让天空 / 无有效深度的像素一直处于线稿区，有限半径也不能覆盖无限远处。
+		// 先用前 75% 时段呈现范围扩张，再在最后 25% 平滑移除剩余线稿，避免结束时天空突然跳色。
+		const float RecoveryFadeAlpha = FMath::Clamp((Alpha - 0.75f) / 0.25f, 0.0f, 1.0f);
+		const float FadeEase = RecoveryFadeAlpha * RecoveryFadeAlpha * (3.0f - 2.0f * RecoveryFadeAlpha);
+		WorldRecoveryCurrentStrength = FMath::Lerp(WorldRecoveryStartStrength, 0.0f, FadeEase);
+	}
+	if (Alpha >= 1.0f)
+		CompleteWorldRecovery();
+}
+
+void ADreamProximitySketchCameraManager::CompleteWorldRecovery()
+{
+	WorldRecoveryCurrentRadius = WorldRecoveryTargetRadius;
+	WorldRecoveryCurrentStrength = bRestoreEntireWorldRequested ? 0.0f : 1.0f;
+	bWorldRecoveryActive = false;
+	bWorldRecoveryFinished = true;
+}
+
 void ADreamProximitySketchCameraManager::ApplyCameraModifiers(float DeltaTime, FMinimalViewInfo& InOutPOV)
 {
 	// 父类每帧清理后处理缓存并执行已有镜头修饰器；在它之后添加本效果，
@@ -52,7 +141,9 @@ void ADreamProximitySketchCameraManager::ApplyCameraModifiers(float DeltaTime, F
 	const APawn* Pawn = PCOwner ? PCOwner->GetPawn() : nullptr;
 	const int32 EnabledOverride = CVarSketchEnabled.GetValueOnGameThread();
 	const bool bEnabled = EnabledOverride < 0 ? bEnableProximitySketch : EnabledOverride != 0;
-	if (!bEnabled || EffectStrength <= 0.0f || !IsValid(Pawn) || !PCOwner->IsLocalController()
+	const float EffectiveStrength = FMath::Clamp(EffectStrength, 0.0f, 1.0f) * WorldRecoveryCurrentStrength;
+	if (!bEnabled || !FMath::IsFinite(EffectiveStrength) || EffectiveStrength <= 0.0f
+		|| !IsValid(Pawn) || !PCOwner->IsLocalController()
 		|| !SketchMaterial || GetNetMode() == NM_DedicatedServer)
 	{
 		// 未占有 Pawn、角色被销毁或被取消控制时不向本帧缓存提交任何材质。
@@ -74,14 +165,13 @@ void ADreamProximitySketchCameraManager::ApplyCameraModifiers(float DeltaTime, F
 		}
 	}
 
-	const float RadiusOverride = CVarSketchRadius.GetValueOnGameThread();
 	const float WidthOverride = CVarSketchTransition.GetValueOnGameThread();
 	const int32 DebugOverride = CVarSketchDebug.GetValueOnGameThread();
 	const FVector Center = Pawn->GetActorLocation();
 	SketchInstance->SetVectorParameterValue(TEXT("PlayerPosition"), FLinearColor(Center.X, Center.Y, Center.Z, 0.0f));
-	SketchInstance->SetScalarParameterValue(TEXT("NormalRadius"), FMath::Max(0.0f, RadiusOverride < 0.0f ? NormalRadius : RadiusOverride));
+	SketchInstance->SetScalarParameterValue(TEXT("NormalRadius"), GetEffectiveNormalRadius());
 	SketchInstance->SetScalarParameterValue(TEXT("TransitionWidth"), FMath::Max(0.0f, WidthOverride < 0.0f ? TransitionWidth : WidthOverride));
-	SketchInstance->SetScalarParameterValue(TEXT("EffectStrength"), FMath::Clamp(EffectStrength, 0.0f, 1.0f));
+	SketchInstance->SetScalarParameterValue(TEXT("EffectStrength"), EffectiveStrength);
 	SketchInstance->SetScalarParameterValue(TEXT("SketchDebugView"), FMath::Clamp(DebugOverride < 0 ? SketchDebugView : DebugOverride, 0, 3));
 	if (SmoothingInstance)
 	{
