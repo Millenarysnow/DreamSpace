@@ -28,7 +28,7 @@ play_settings = unreal.get_default_object(unreal.load_class(None, "/Script/Unrea
 original_audio_settings = {name: play_settings.get_editor_property(name)
                            for name in ("EnableGameSound", "SoloAudioInFirstPIEClient")}
 menu_defaults = unreal.get_default_object(unreal.DreamMainMenuPlayerController)
-original_fade_out = menu_defaults.get_editor_property("fade_out_duration")
+original_approach = menu_defaults.get_editor_property("rooftop_approach_duration")
 misc_settings = unreal.get_default_object(unreal.load_class(None, "/Script/UnrealEd.LevelEditorMiscSettings"))
 original_background_audio = misc_settings.get_editor_property("bAllowBackgroundAudio")
 
@@ -126,7 +126,7 @@ def finish(error=None):
         level.editor_request_end_play()
     for setting, value in original_audio_settings.items():
         play_settings.set_editor_property(setting, value)
-    menu_defaults.set_editor_property("fade_out_duration", original_fade_out)
+    menu_defaults.set_editor_property("rooftop_approach_duration", original_approach)
     misc_settings.set_editor_property("bAllowBackgroundAudio", original_background_audio)
     (OUTPUT / "verification_report.json").write_text(
         json.dumps({"passed": error is None, "error": error, "checks": state["checks"]},
@@ -134,9 +134,14 @@ def finish(error=None):
     unreal.unregister_slate_post_tick_callback(handle)
     unreal.EditorPythonScripting.set_keep_python_script_alive(False)
     (unreal.log_error if error else unreal.log)("DREAM_AUDIO_VERIFY_RESULT " + str(error or "PASS"))
+    unreal.SystemLibrary.quit_editor()
 
 
 def tick(delta):
+    # 镜头切关 / 截图可嵌套刷新 Slate，正在执行的状态不能被重入回调重复处理。
+    if state.get("ticking"):
+        return
+    state["ticking"] = True
     try:
         now = time.monotonic()
         elapsed = now - state["at"]
@@ -177,7 +182,7 @@ def tick(delta):
             controller.request_start_game()
             require(state["audio"].get_transition_component() == transition, "重复点击叠加了进入音效")
             state["checks"]["click_and_repeat_are_idempotent"] = True
-            # 当帧读取，避免首次加载着色器造成长帧时，下一次 Python 回调已错过 0.65 秒淡出区间。
+            # 当帧读取，避免首次加载长帧时错过开始时的淡出状态；BGM 使用天台推进时长。
             require(state["old_menu_music"].get_play_state() == unreal.AudioComponentPlayState.FADING_OUT,
                     "菜单音乐没有进入淡出状态")
             state["checks"]["menu_fades_out"] = True
@@ -218,8 +223,8 @@ def tick(delta):
         elif current == "restart" and elapsed > 2.0 and not level.is_in_play_in_editor():
             check_released(state["game_component_path"])
             require(level.load_level(MENU), "无法重新加载菜单")
-            # FadeOutDuration 是 EditDefaultsOnly，不能修改已生成的控制器实例；在本进程 CDO 上配置后再开始 PIE。
-            menu_defaults.set_editor_property("fade_out_duration", 0.0)
+            # 音乐淡出跟随天台推进而非 Logo。只在当前进程 CDO 缩短推进，不保存项目配置。
+            menu_defaults.set_editor_property("rooftop_approach_duration", 0.1)
             level.editor_request_begin_play()
             phase("abort_transition")
         elif current == "abort_transition" and elapsed > 3.0 and game_world():
@@ -229,7 +234,7 @@ def tick(delta):
             state["abort_music_path"] = music.get_path_name()
             controller = unreal.GameplayStatics.get_player_controller(world, 0)
             controller.request_start_game()
-            require(audio.get_transition_component() is not None, "零淡出时长未播放音效")
+            require(audio.get_transition_component() is not None, "短推进时长未播放音效")
             state["abort_effect_path"] = audio.get_transition_component().get_path_name()
             # 在短音效尚未结束时退出，验证设备级持久化音效也会被 GameInstance 关闭路径清理。
             level.editor_request_end_play()
@@ -254,6 +259,8 @@ def tick(delta):
             finish()
     except Exception as error:
         finish(str(error))
+    finally:
+        state["ticking"] = False
 
 
 require(level.load_level(MENU), "无法加载菜单地图")

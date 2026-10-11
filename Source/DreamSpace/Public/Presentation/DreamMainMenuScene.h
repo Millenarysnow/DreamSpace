@@ -75,6 +75,36 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "开始界面")
 	void UpdateCamera(float AspectRatio = 1.777778f);
 
+	/**
+	 * 开始从当前展示镜头飞向天台。用点击瞬间的相机作为起点，建筑在推进中
+	 * 平滑回到玩法地图的基准姿态；到达终点时，屏幕视点与 TEST 天台完全对齐。
+	 */
+	void BeginRooftopApproach(float Duration);
+	void AdvanceRooftopApproach(float Elapsed);
+	FMinimalViewInfo GetGameplayEntryView() const;
+
+	/** TEST 建筑的原始坐标系；菜单摆放/旋转可以不同，飞入终点由此映射到展示坐标系。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "开始界面|天台过渡")
+	FTransform GameplayBuildingTransform = FTransform(FVector(70.282925, -642.417214, -876.091904));
+
+	/** 真实 PlayerStart 的胶囊中心，作为天台焦点；玩法地图修改后可运行增量同步脚本更新。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "开始界面|天台过渡")
+	FVector RooftopPlayerLocation = FVector(-266.224722, -537.364255, 889.110283);
+
+	/** 在角色初始朝向的局部坐标中取景：镜头从天台外上方接近，停在围墙上方。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "开始界面|天台过渡")
+	FRotator RooftopPlayerRotation = FRotator::ZeroRotator;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "开始界面|天台过渡")
+	FVector RooftopCameraOffset = FVector(-750.0, -160.0, 700.0);
+
+	/** 轻微望向角色前方；天台地面和围墙会出现在画面中央，而不是瞄准胶囊顶部。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "开始界面|天台过渡")
+	FVector RooftopFocusOffset = FVector(120.0, 0.0, -50.0);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "开始界面|天台过渡", meta = (ClampMin = "30.0", ClampMax = "100.0"))
+	float RooftopFieldOfView = 65.0f;
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -86,6 +116,10 @@ private:
 	float RotationAngle = 0.0f;
 	float LastAspectRatio = 0.0f;
 	bool bLastLogoOnRight = false;
+	bool bApproachingRooftop = false;
+	float ApproachDuration = 3.8f;
+	float ApproachStartAngle = 0.0f;
+	FMinimalViewInfo ApproachStartView;
 
 	void UpdateHatchingCoordinates();
 };

@@ -85,6 +85,10 @@ void ADreamHUD::DrawPasswordEntry(const ADreamPlayerController* Controller)
 
 void ADreamHUD::DrawHUD()
 {
+	// 包括等待 Pawn 和初始跨地图接续的帧，不让准星 / 开发提示抢先出现在天台线稿上。
+	if (const ADreamPlayerController* Controller = Cast<ADreamPlayerController>(PlayerOwner))
+		if (Controller->IsMenuArrivalActive())
+			return;
 	Super::DrawHUD();
 	if (!Canvas)
 		return;

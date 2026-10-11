@@ -204,6 +204,10 @@ void ADreamCharacter::Look(const FInputActionValue& Value)
 
 void ADreamCharacter::DoMove(float Right, float Forward)
 {
+	// 蓝图触摸按钮可绕过 Enhanced Input 映射，必须在角色入口也阻止入场时移动。
+	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
+		if (DreamController->IsMenuArrivalActive())
+			return;
 	if (!Controller)
 	{
 		return;
@@ -233,7 +237,7 @@ void ADreamCharacter::DoLook(float Yaw, float Pitch)
 	// 手办交互模式下鼠标负责在显示面上选点，不能同时改变第三人称相机。
 	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
 	{
-		if (DreamController->IsMiniatureInteractionMode() || DreamController->IsEnteringPassword())
+		if (DreamController->IsMenuArrivalActive() || DreamController->IsMiniatureInteractionMode() || DreamController->IsEnteringPassword())
 		{
 			return;
 		}
@@ -251,7 +255,7 @@ void ADreamCharacter::DoJumpStart()
 	// Tab 聚焦期间保持手持显示面稳定，避免跳跃输入绕过控制器的移动忽略计数。
 	// 仍允许已经发生的下落与平台搬运，退出观察后立即恢复原来的跳跃入口。
 	if (const ADreamPlayerController* DreamController = Cast<ADreamPlayerController>(Controller))
-		if (DreamController->IsMiniatureInteractionMode() || DreamController->IsEnteringPassword())
+		if (DreamController->IsMenuArrivalActive() || DreamController->IsMiniatureInteractionMode() || DreamController->IsEnteringPassword())
 			return;
 	Jump();
 }

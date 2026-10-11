@@ -48,6 +48,9 @@ public:
 	bool IsDraggingInteraction() const;
 	/** 当前是否显示鼠标、允许直接点击手办中的物体。供开发期 HUD 显示操作提示。 */
 	bool IsMiniatureInteractionMode() const { return bMiniatureInteractionMode; }
+	/** 跨地图天台镜头尚未落到角色时，探索与触摸输入共用此只读状态。 */
+	UFUNCTION(BlueprintPure, Category = "开始界面|天台过渡")
+	bool IsMenuArrivalActive() const;
 	/** HUD 在屏幕上显示最近一次点击的十字和结果，避免沿视线的世界调试线缩成一个点。 */
 	bool GetMiniatureClickDebug(FVector2D& OutPosition, FString& OutMessage, FLinearColor& OutColor) const;
 

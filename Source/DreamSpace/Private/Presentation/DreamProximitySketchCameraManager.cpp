@@ -2,6 +2,9 @@
 
 #include "Components/DirectionalLightComponent.h"
 #include "DreamSpace.h"
+#include "DreamMenuTransitionSubsystem.h"
+#include "Engine/GameInstance.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/DirectionalLight.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -42,6 +45,9 @@ ADreamProximitySketchCameraManager::ADreamProximitySketchCameraManager()
 		SmoothingMaterial = Smoothing.Object;
 	else
 		UE_LOG(LogDreamSpace, Error, TEXT("距离线稿平滑材质缺失，请先运行 generate_proximity_sketch.py。"));
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Paper(
+		TEXT("/Game/DreamPresentation/MainMenu/Materials/MI_MenuPaper.MI_MenuPaper"));
+	ArrivalPaperMaterial = Paper.Object;
 }
 
 float ADreamProximitySketchCameraManager::GetEffectiveNormalRadius() const
@@ -95,13 +101,62 @@ bool ADreamProximitySketchCameraManager::StartWorldRecovery(
 
 void ADreamProximitySketchCameraManager::UpdateCamera(float DeltaTime)
 {
+	UGameInstance* Instance = GetGameInstance();
+	UDreamMenuTransitionSubsystem* Transition = Instance ? Instance->GetSubsystem<UDreamMenuTransitionSubsystem>() : nullptr;
+	const bool bHasPlayerView = IsValid(PCOwner) && PCOwner->IsLocalController() && IsValid(PCOwner->GetPawn());
+	// 入场已开始后失去角色或被剧情镜头接管，应立刻释放跨地图快照与输入门控。
+	// 初次加载等待 Pawn 的阶段则保留快照，不能把正常出生顺序误判成中断。
+	if (Transition && Transition->IsArrivalRunning(GetWorld())
+		&& (!bHasPlayerView || GetViewTarget() != PCOwner->GetPawn()))
+		Transition->CompleteArrival();
 	// 引擎混合两个 ViewTarget 时会各自执行 ApplyCameraModifiers，必须在更外层推进一次。
 	// DeltaTime 来自游戏相机更新，随游戏时间缩放；暂停或临时取消占有时保持当前进度，
 	// 重新占有后从同一半径继续，因此不会在没有玩家视图的间隙悄悄完成恢复。
-	if (IsValid(PCOwner) && PCOwner->IsLocalController() && IsValid(PCOwner->GetPawn())
-		&& GetWorld() && !GetWorld()->IsPaused())
+	if (bHasPlayerView && GetWorld() && !GetWorld()->IsPaused())
+	{
+		if (Transition && GetViewTarget() == PCOwner->GetPawn())
+			Transition->AdvanceArrival(GetWorld(), DeltaTime);
 		UpdateWorldRecovery(DeltaTime);
+	}
 	Super::UpdateCamera(DeltaTime);
+	// 先发布终点的真实相机缓存，再释放输入 / UI 接力，避免提前一帧接管导致相机跳动。
+	if (Transition && Transition->IsArrivalRunning(GetWorld()) && Transition->GetCameraBlendAlpha() >= 1.0f)
+		Transition->CompleteArrival();
+	// 正常结束与外部中断都走相同释放路径，动态材质不会留到下次占有角色。
+	if (!Transition || !Transition->IsArrivalForWorld(GetWorld()))
+	{
+		ArrivalPaperSettings.WeightedBlendables.Array.Reset();
+		ArrivalPaperInstance = nullptr;
+	}
+}
+
+void ADreamProximitySketchCameraManager::UpdateViewTargetInternal(FTViewTarget& OutVT, float DeltaTime)
+{
+	Super::UpdateViewTargetInternal(OutVT, DeltaTime);
+	UGameInstance* Instance = GetGameInstance();
+	UDreamMenuTransitionSubsystem* Transition = Instance ? Instance->GetSubsystem<UDreamMenuTransitionSubsystem>() : nullptr;
+	if (!Transition || !Transition->IsArrivalRunning(GetWorld()) || !PCOwner
+		|| OutVT.Target != PCOwner->GetPawn())
+		return;
+	const float Alpha = Transition->GetCameraBlendAlpha();
+	if (Alpha >= 1.0f)
+		return;
+	// OutVT.POV 来自 Pawn::CalcCamera，包含实际避障、重力、FOV 和人物局部剔除标记。
+	// 只插值位置、旋转与视野；不猜测 SpringArm 的理想臂长，目标会跟随出生时的落地。
+	const FMinimalViewInfo& Entry = Transition->GetEntryView();
+	int32 Width = 0, Height = 0;
+	PCOwner->GetViewportSize(Width, Height);
+	const float Aspect = Width > 0 && Height > 0 ? static_cast<float>(Width) / Height : Entry.AspectRatio;
+	const ULocalPlayer* LocalPlayer = PCOwner->GetLocalPlayer();
+	const EAspectRatioAxisConstraint Constraint = LocalPlayer ? LocalPlayer->AspectRatioAxisConstraint.GetValue()
+		: AspectRatio_MaintainYFOV;
+	const float PlayerFOV = UDreamMenuTransitionSubsystem::HorizontalFOV(OutVT.POV, Aspect, Constraint);
+	OutVT.POV.Location = FMath::Lerp(Entry.Location, OutVT.POV.Location, Alpha);
+	OutVT.POV.Rotation = FQuat::Slerp(Entry.Rotation.Quaternion(), OutVT.POV.Rotation.Quaternion(), Alpha).Rotator();
+	OutVT.POV.FOV = FMath::Lerp(Entry.FOV, PlayerFOV, Alpha);
+	OutVT.POV.AspectRatioAxisConstraint = AspectRatio_MaintainXFOV;
+	OutVT.POV.AspectRatio = Aspect;
+	OutVT.POV.bConstrainAspectRatio = false;
 }
 
 void ADreamProximitySketchCameraManager::UpdateWorldRecovery(float DeltaTime)
@@ -141,6 +196,10 @@ void ADreamProximitySketchCameraManager::ApplyCameraModifiers(float DeltaTime, F
 	const APawn* Pawn = PCOwner ? PCOwner->GetPawn() : nullptr;
 	const int32 EnabledOverride = CVarSketchEnabled.GetValueOnGameThread();
 	const bool bEnabled = EnabledOverride < 0 ? bEnableProximitySketch : EnabledOverride != 0;
+	UGameInstance* Instance = GetGameInstance();
+	UDreamMenuTransitionSubsystem* Transition = Instance ? Instance->GetSubsystem<UDreamMenuTransitionSubsystem>() : nullptr;
+	const bool bArrival = Transition && Transition->IsArrivalRunning(GetWorld());
+	const float StyleAlpha = bArrival ? Transition->GetStyleBlendAlpha() : 1.0f;
 	const float EffectiveStrength = FMath::Clamp(EffectStrength, 0.0f, 1.0f) * WorldRecoveryCurrentStrength;
 	if (!bEnabled || !FMath::IsFinite(EffectiveStrength) || EffectiveStrength <= 0.0f
 		|| !IsValid(Pawn) || !PCOwner->IsLocalController()
@@ -169,7 +228,8 @@ void ADreamProximitySketchCameraManager::ApplyCameraModifiers(float DeltaTime, F
 	const int32 DebugOverride = CVarSketchDebug.GetValueOnGameThread();
 	const FVector Center = Pawn->GetActorLocation();
 	SketchInstance->SetVectorParameterValue(TEXT("PlayerPosition"), FLinearColor(Center.X, Center.Y, Center.Z, 0.0f));
-	SketchInstance->SetScalarParameterValue(TEXT("NormalRadius"), GetEffectiveNormalRadius());
+	// 菜单接续时先保持整座天台线稿，再恢复角色附近的正常材质；世界恢复的真实半径仍独立保存。
+	SketchInstance->SetScalarParameterValue(TEXT("NormalRadius"), GetEffectiveNormalRadius() * StyleAlpha);
 	SketchInstance->SetScalarParameterValue(TEXT("TransitionWidth"), FMath::Max(0.0f, WidthOverride < 0.0f ? TransitionWidth : WidthOverride));
 	SketchInstance->SetScalarParameterValue(TEXT("EffectStrength"), EffectiveStrength);
 	SketchInstance->SetScalarParameterValue(TEXT("SketchDebugView"), FMath::Clamp(DebugOverride < 0 ? SketchDebugView : DebugOverride, 0, 3));
@@ -186,6 +246,18 @@ void ADreamProximitySketchCameraManager::ApplyCameraModifiers(float DeltaTime, F
 	// 相机缓存仅应用于此本地玩家的最终视图，SceneCapture 不会遍历它。
 	// 使用 Override 顺序，让蓝图相机的 PostProcessBlendWeight=0 也不意外关闭效果。
 	AddCachedPPBlend(SketchSettings, 1.0f, VTBlendOrder_Override);
+	if (bArrival && StyleAlpha < 1.0f && ArrivalPaperMaterial)
+	{
+		if (!ArrivalPaperInstance)
+		{
+			ArrivalPaperInstance = UMaterialInstanceDynamic::Create(ArrivalPaperMaterial, this);
+			ArrivalPaperSettings.AddBlendable(ArrivalPaperInstance, 1.0f);
+		}
+		ArrivalPaperInstance->SetScalarParameterValue(TEXT("PaperStrength"), 0.48f * (1.0f - StyleAlpha));
+		ArrivalPaperInstance->SetVectorParameterValue(TEXT("PaperTint"), FMath::Lerp(
+			FLinearColor(0.965f, 0.958f, 0.94f, 1.0f), FLinearColor::White, StyleAlpha));
+		AddCachedPPBlend(ArrivalPaperSettings, 1.0f, VTBlendOrder_Override);
+	}
 }
 
 void ADreamProximitySketchCameraManager::UpdateLightDirection()
@@ -218,5 +290,7 @@ void ADreamProximitySketchCameraManager::EndPlay(const EEndPlayReason::Type Reas
 	SketchInstance = nullptr;
 	SmoothingInstance = nullptr;
 	KeyLight.Reset();
+	ArrivalPaperSettings.WeightedBlendables.Array.Reset();
+	ArrivalPaperInstance = nullptr;
 	Super::EndPlay(Reason);
 }

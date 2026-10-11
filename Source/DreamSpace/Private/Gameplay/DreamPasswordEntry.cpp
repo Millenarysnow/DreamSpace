@@ -42,6 +42,10 @@ void ADreamPlayerController::ClosePasswordEntry()
 
 bool ADreamPlayerController::InputKey(const FInputKeyEventArgs& Params)
 {
+	// 接管前消费按下 / 重复输入，仍让引擎清理释放事件。否则开始时按住空格会在
+	// 新地图直接触发跳跃，或把落镜头阶段的鼠标位移累计成一次视角甩动。
+	if (IsMenuArrivalActive() && Params.Event != IE_Released)
+		return true;
 	if (IsEnteringPassword() && Params.Event != IE_Released)
 	{
 		// 数字只接受新按下，长按不会自动补满四格；删除允许系统重复事件，方便连续删改。

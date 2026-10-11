@@ -1,4 +1,5 @@
 #include "DreamMainMenuScene.h"
+#include "DreamMenuTransitionSubsystem.h"
 
 #include "Camera/CameraComponent.h"
 #include "Components/SceneComponent.h"
@@ -127,6 +128,19 @@ void ADreamMainMenuScene::BeginPlay()
 void ADreamMainMenuScene::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	// 飞入由控制器统一推进。此时窗口变化只更新投影比例，不重新运行全建筑取景，
+	// 否则一次窗口缩放会把已经靠近天台的镜头突然弹回菜单远景。
+	if (bApproachingRooftop)
+	{
+		if (const APlayerController* Controller = GetWorld()->GetFirstPlayerController())
+		{
+			int32 Width = 0, Height = 0;
+			Controller->GetViewportSize(Width, Height);
+			if (Width > 0 && Height > 0)
+				MenuCamera->SetAspectRatio(static_cast<float>(Width) / Height);
+		}
+		return;
+	}
 	// 角度按秒累计并保持在一圈以内，帧率改变不影响速度，久置也不会损失浮点精度。
 	RotationAngle = FMath::Fmod(RotationAngle + RotationSpeed * DeltaSeconds, 360.0f);
 	BuildingPivot->SetRelativeRotation(FRotator(0.0f, RotationAngle, 0.0f));
@@ -146,6 +160,8 @@ void ADreamMainMenuScene::Tick(float DeltaSeconds)
 
 void ADreamMainMenuScene::UpdateCamera(float AspectRatio)
 {
+	if (bApproachingRooftop)
+		return;
 	const FMinimalViewInfo View = ComputeCameraView(BuildingPivot->GetComponentLocation(),
 		BuildingHalfExtent, AspectRatio, bLogoOnRight);
 	MenuCamera->SetWorldLocationAndRotation(View.Location, View.Rotation);
@@ -153,6 +169,63 @@ void ADreamMainMenuScene::UpdateCamera(float AspectRatio)
 	MenuCamera->SetAspectRatio(View.AspectRatio);
 	LastAspectRatio = AspectRatio;
 	bLastLogoOnRight = bLogoOnRight;
+}
+
+FMinimalViewInfo ADreamMainMenuScene::GetGameplayEntryView() const
+{
+	FMinimalViewInfo View;
+	View.Location = RooftopPlayerLocation + RooftopPlayerRotation.RotateVector(RooftopCameraOffset);
+	const FVector Focus = RooftopPlayerLocation + RooftopPlayerRotation.RotateVector(RooftopFocusOffset);
+	View.Rotation = (Focus - View.Location).Rotation();
+	View.FOV = RooftopFieldOfView;
+	View.AspectRatio = MenuCamera->AspectRatio;
+	View.bConstrainAspectRatio = false;
+	View.AspectRatioAxisConstraint = AspectRatio_MaintainXFOV;
+	return View;
+}
+
+void ADreamMainMenuScene::BeginRooftopApproach(float Duration)
+{
+	if (bApproachingRooftop)
+		return;
+	bApproachingRooftop = true;
+	ApproachDuration = FMath::Max(Duration, 0.01f);
+	// 以最短路径回到玩法建筑的初始姿态，359° 只需退回 1°，不会在飞入时额外绕一圈。
+	ApproachStartAngle = FMath::UnwindDegrees(RotationAngle);
+	MenuCamera->GetCameraView(0.0f, ApproachStartView);
+}
+
+void ADreamMainMenuScene::AdvanceRooftopApproach(float Elapsed)
+{
+	if (!bApproachingRooftop)
+		return;
+	const float Time = FMath::Clamp(Elapsed, 0.0f, ApproachDuration);
+	const float T = Time / ApproachDuration;
+	const float Alpha = UDreamMenuTransitionSubsystem::Ease(T);
+	// 五次 Hermite 插值同时约束角度、角速度和角加速度：开头延续 2°/秒，
+	// 终点回到 0° 且完全静止。归位贯穿整个推进，不能在切图那一帧突然归零。
+	const float VelocityBasis = T - 6.0f * T * T * T + 8.0f * T * T * T * T - 3.0f * T * T * T * T * T;
+	RotationAngle = ApproachStartAngle * (1.0f - Alpha) + RotationSpeed * ApproachDuration * VelocityBasis;
+	BuildingPivot->SetRelativeRotation(FRotator(0.0f, RotationAngle, 0.0f));
+	UpdateHatchingCoordinates();
+
+	const FMinimalViewInfo Target = GetGameplayEntryView();
+	const FTransform Display = BuildingPivot->GetComponentTransform();
+	const FVector TargetLocation = Display.TransformPosition(
+		GameplayBuildingTransform.InverseTransformPosition(Target.Location));
+	const FQuat TargetRotation = Display.GetRotation() * GameplayBuildingTransform.GetRotation().Inverse()
+		* Target.Rotation.Quaternion();
+	// 大距离推进采用对数距离：最后几十米不会比前半段冲得更快。
+	// 从天台终点回看起点的距离指数缩短，朝向以四元数插值消除角度跨 ±180° 的跳变。
+	const FVector Offset = ApproachStartView.Location - TargetLocation;
+	const double Distance = Offset.Length();
+	const double SoftDistance = 900.0;
+	const double Remaining = FMath::Exp(FMath::Lerp(FMath::Loge(Distance + SoftDistance),
+		FMath::Loge(SoftDistance), static_cast<double>(Alpha))) - SoftDistance;
+	const FVector Position = TargetLocation + Offset.GetSafeNormal() * Remaining;
+	const FQuat Rotation = FQuat::Slerp(ApproachStartView.Rotation.Quaternion(), TargetRotation, Alpha).GetNormalized();
+	MenuCamera->SetWorldLocationAndRotation(Position, Rotation);
+	MenuCamera->SetFieldOfView(FMath::Lerp(ApproachStartView.FOV, Target.FOV, Alpha));
 }
 
 void ADreamMainMenuScene::UpdateHatchingCoordinates()
