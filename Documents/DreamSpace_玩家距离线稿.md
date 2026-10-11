@@ -21,6 +21,8 @@
 
 相机类同时公开有中文提示的 `bEnableProximitySketch`、`NormalRadius`、`TransitionWidth`、`EffectStrength` 属性，可通过蓝图或 C++ 动态修改。每位本地玩家使用自己的动态材质实例；换 Pawn 自动更新球心，取消占有或退出关卡后不再提交效果。
 
+交互后逐渐扩大正常渲染范围，可给机关添加 **Dream World Recovery** 组件，见 [世界恢复交互组件](DreamSpace_世界恢复组件.md)。恢复动画使用相机内独立的瞬时半径覆盖；支持分阶段扩张和最终恢复整个世界，不改写材质、默认配置或共享控制台数值。
+
 排线、轮廓的美术参数位于 `/Game/DreamPresentation/ProximitySketch/Materials/MI_ProximitySketch`，沿用白色建筑预览的 `HatchSpacing`、`HatchStrength`、`HatchWidth`、`HatchToneBias`、`StructureStrength` 等名称。范围参数和玩家位置由相机每帧写入，应通过配置或控制台调节。`MI_ProximitySketchAA` 控制新增线条的 `SmoothingStrength`，默认 1。
 
 ## 实现与适用范围
